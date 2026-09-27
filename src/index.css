@@ -1,0 +1,137 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 240 10% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 240 10% 5.5%;
+  --card-foreground: 0 0% 98%;
+  --popover: 240 10% 4.5%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 24 100% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 240 5% 12%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 240 5% 15%;
+  --muted-foreground: 240 5% 65%;
+  --accent: 24 95% 53%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 240 5% 16%;
+  --input: 240 5% 16%;
+  --ring: 24 100% 50%;
+  --radius: 0.85rem;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  user-select: none;
+  background-color: #050507;
+  color: #ffffff;
+  overflow: hidden;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #ff6600;
+  box-shadow: 0 0 10px rgba(255, 102, 0, 0.6);
+}
+
+/* Glassmorphism & Panel Utilities */
+.glass-panel {
+  background: rgba(12, 12, 15, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: rgba(15, 15, 19, 0.85);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: all 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card:hover {
+  border-color: rgba(255, 102, 0, 0.55);
+  box-shadow: 0 12px 35px -8px rgba(255, 102, 0, 0.32);
+  transform: translateY(-3px);
+}
+
+/* Orange / White / Black Gradients */
+.gradient-primary {
+  background: linear-gradient(135deg, #ff5500 0%, #ff7700 50%, #ffa500 100%);
+}
+
+.gradient-primary:hover {
+  background: linear-gradient(135deg, #ff6600 0%, #ff8800 50%, #ffb31a 100%);
+}
+
+.gradient-accent {
+  background: linear-gradient(135deg, #ff4500 0%, #ff6a00 100%);
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, #ffffff 0%, #ffe5d0 50%, #ff6600 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-gradient-orange {
+  background: linear-gradient(135deg, #ffa366 0%, #ff6600 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Glowing Accents */
+.glow-orange {
+  box-shadow: 0 0 25px -4px rgba(255, 102, 0, 0.45);
+}
+
+.glow-orange-sm {
+  box-shadow: 0 0 12px -2px rgba(255, 102, 0, 0.35);
+}
+
+.glow-orange-lg {
+  box-shadow: 0 0 45px -5px rgba(255, 102, 0, 0.55);
+}
+
+.border-glow-orange {
+  border-color: #ff6600;
+  box-shadow: 0 0 20px -3px rgba(255, 102, 0, 0.4);
+}
+
+/* Animations */
+@keyframes orangePulse {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.02);
+  }
+}
+
+.animate-orange-pulse {
+  animation: orangePulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+

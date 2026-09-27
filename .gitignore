@@ -1,0 +1,39 @@
+# Rust / Tauri build output
+target/
+src-tauri/target/
+**/*.rs.bk
+src-tauri/gen/schemas/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.vite-temp/
+
+# Local databases and logs
+*.db
+*.db-journal
+*.log
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Reference repo (third-party clone, not part of this project)
+reference/
+
+# Generated promo artefacts (launch-video renders, licensed audio)
+brag-output/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Crash dumps / symbols
+*.pdb

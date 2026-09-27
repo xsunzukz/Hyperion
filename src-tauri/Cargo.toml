@@ -1,0 +1,62 @@
+[package]
+name = "hyperion"
+version = "1.0.0"
+description = "Hyperion - Fast native Rust game launcher for Epic Games Store"
+authors = ["Hyperion Contributors"]
+edition = "2021"
+
+[lib]
+name = "hyperion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dependencies]
+tauri = { version = "2.2", features = [] }
+tauri-plugin-opener = "2"
+tokio = { version = "1.43", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.33", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+flate2 = "1.0"
+sha1 = "0.10"
+sha2 = "0.10"
+md-5 = "0.10"
+crc32fast = "1.4"
+aes-gcm = "0.10"
+byteorder = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+thiserror = "2.0"
+dirs = "6.0"
+uuid = { version = "1.13", features = ["v4"] }
+sysinfo = "0.33"
+open = "5.3"
+url = "2.5"
+base64 = "0.22"
+hex = "0.4"
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+# Win32 APIs used instead of shelling out to taskkill/reg, which antivirus
+# engines treat as suspicious behaviour coming from a game launcher.
+windows = { version = "0.57", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+winreg = "0.56"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

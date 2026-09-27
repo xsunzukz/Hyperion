@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/hyperion logo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Hyperion - Fast, native Rust game launcher for Epic Games Store" />
+    <title>Hyperion</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-[#050507] text-white font-sans antialiased overflow-hidden select-none">
+    <div id="root"></div>
+    <script>
+      // Disable default browser context menu (Back, Refresh, Save as, Print)
+      window.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+      }, false);
+      // Disable reload/print browser hotkeys
+      window.addEventListener('keydown', function(e) {
+        if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R' || e.key === 'p' || e.key === 'P'))) {
+          e.preventDefault();
+        }
+      }, false);
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
