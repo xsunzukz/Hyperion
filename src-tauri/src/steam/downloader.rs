@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -280,11 +280,17 @@ impl SteamDownloadManager {
     /// Valve has no "verify password" API, so this is the same login a download
     /// would perform — minus `+app_update`, so nothing is installed. Callers use
     /// it to reject wrong credentials before anything is stored or downloaded.
+    ///
+    /// Steam Guard approvals arrive on the user's phone and can take a while, so
+    /// the process is kept alive (stdin open, output streamed) and given a
+    /// generous window instead of being judged the instant it prints a prompt.
     pub async fn verify_login(
         username: &str,
         password: &str,
         guard_code: Option<&str>,
     ) -> Result<(), String> {
+        const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
         let username = username.trim();
         if username.is_empty() || password.is_empty() {
             return Err("Steam account name and password are both required".to_string());
@@ -298,7 +304,9 @@ impl SteamDownloadManager {
             cmd.arg(code);
         }
         cmd.arg("+quit")
-            .stdin(Stdio::null())
+            // stdin stays open: SteamCMD reads the Guard prompt from it, and an
+            // immediate EOF makes it abort before the phone approval lands.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -308,18 +316,71 @@ impl SteamDownloadManager {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let output = cmd
-            .output()
-            .await
+        let mut child = cmd
+            .spawn()
             .map_err(|e| format!("Could not start SteamCMD to check the sign-in: {}", e))?;
 
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let mut stdin = child.stdin.take();
+        let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill().await;
+            return Err("Could not read SteamCMD output while checking the sign-in".to_string());
+        };
 
-        classify_login_output(&combined)
+        let mut lines = BufReader::new(stdout).lines();
+        let mut transcript = String::new();
+        let deadline = tokio::time::Instant::now() + APPROVAL_TIMEOUT;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                let _ = child.kill().await;
+                return Err(guard_timeout_message(&transcript));
+            }
+
+            let line = match tokio::time::timeout(remaining, lines.next_line()).await {
+                Err(_) => {
+                    let _ = child.kill().await;
+                    return Err(guard_timeout_message(&transcript));
+                }
+                Ok(Ok(Some(line))) => line,
+                // EOF or read error: SteamCMD is done talking
+                Ok(Ok(None)) | Ok(Err(_)) => break,
+            };
+
+            transcript.push_str(&line);
+            transcript.push('\n');
+            debug!("steamcmd login: {}", line);
+
+            let lower = line.to_lowercase();
+
+            if lower.contains("logged in ok") {
+                let _ = child.kill().await;
+                return Ok(());
+            }
+
+            // A code prompt: feed through the code typed in the dialog, if any
+            if lower.contains("steam guard code")
+                || lower.contains("two-factor code")
+                || lower.contains("auth code")
+            {
+                if let (Some(code), Some(sink)) = (guard_code, stdin.as_mut()) {
+                    let code = code.trim();
+                    if !code.is_empty() {
+                        let _ = sink.write_all(format!("{}\n", code).as_bytes()).await;
+                        let _ = sink.flush().await;
+                        info!("Sent the Steam Guard code to SteamCMD");
+                        stdin = None;
+                    }
+                }
+            }
+
+            if lower.contains("invalid password") || lower.contains("account not found") {
+                break;
+            }
+        }
+
+        let _ = child.wait().await;
+        classify_login_output(&transcript)
     }
 
     /// Spawns a background SteamCMD process to download and verify the given game
@@ -1389,6 +1450,25 @@ fn loginusers_has_account(content: &str, username: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True when SteamCMD's output mentions Steam Guard or a phone confirmation.
+fn mentions_guard(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("steam guard")
+        || lower.contains("two-factor")
+        || lower.contains("confirmation")
+        || lower.contains("authenticator")
+        || lower.contains("invalidloginauthcode")
+}
+
+/// Error text for the case where Steam never finished the sign-in.
+fn guard_timeout_message(output: &str) -> String {
+    if mentions_guard(output) {
+        "Steam is still waiting for the Steam Guard approval. Approve the sign-in in the Steam app (or enter the current code) and try again.".to_string()
+    } else {
+        "Steam did not answer in time — check your connection and try again".to_string()
+    }
+}
+
 /// Turns SteamCMD's console output into a verdict on the sign-in attempt.
 ///
 /// SteamCMD only ever prints text, so the outcome has to be read from the log:
@@ -1407,7 +1487,7 @@ fn classify_login_output(output: &str) -> Result<(), String> {
         || lower.contains("steam guard code")
         || lower.contains("needs to be confirmed")
     {
-        "Steam Guard code is missing or incorrect"
+        "Steam Guard didn't complete — approve the request in the Steam app, or enter the current code, then try again"
     } else if lower.contains("rate limit exceeded") {
         "Too many sign-in attempts — Valve rate-limited this account. Wait a few minutes and try again"
     } else if lower.contains("account login denied") || lower.contains("accountlogondenied") {

@@ -220,6 +220,16 @@ export const SteamEngineLoginModal: React.FC<SteamEngineLoginModalProps> = ({
             </div>
           )}
 
+          {isSubmitting && mode === 'full' && (
+            <div className="flex items-start gap-2 rounded-xl bg-sky-500/10 border border-sky-500/30 px-3 py-2.5 text-[11px] text-sky-200">
+              <Loader2 className="w-3.5 h-3.5 text-sky-300 flex-shrink-0 mt-0.5 animate-spin" />
+              <span className="leading-relaxed">
+                Waiting for Valve. If the Steam app asks you to approve this sign-in, tap approve —
+                it can take up to a minute, the dialog will continue on its own.
+              </span>
+            </div>
+          )}
+
           <div className="flex items-start gap-2 text-[11px] text-zinc-500 pt-1">
             <Lock className="w-3.5 h-3.5 text-emerald-500/80 flex-shrink-0 mt-0.5" />
             <span className="leading-relaxed">
