@@ -476,9 +476,15 @@ export const App: React.FC = () => {
 
   const handleCancelOrDismissDownload = async (appName: string) => {
     const current = downloads[appName];
+    const finished =
+      current?.status === 'Completed' || current?.status === 'Cancelled' || current?.status === 'Failed';
     try {
-      await gameCancelDownload(appName);
-      showNotification(`Download cancelled / removed for ${current?.title || appName}`, 'info');
+      // A finished entry is only cleared from the queue: there is nothing left
+      // to cancel, and the backend must never be asked to touch that install.
+      if (!finished) {
+        await gameCancelDownload(appName);
+        showNotification(`Download cancelled for ${current?.title || appName}`, 'info');
+      }
     } catch (e) {
       console.error('Cancel download error:', e);
     } finally {

@@ -1258,18 +1258,27 @@ pub async fn catalog_get_game_details(
 // Steam install routing helpers
 // ==========================================
 
-/// Strips characters that are illegal or awkward in a Windows folder name.
-fn clean_steam_title(title: &str) -> String {
-    title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// Where a title installs: the requested folder when it is the game's own, else
+/// a per-game folder inside it (or inside the library root). An existing install
+/// of the same app keeps its folder, so updates land in place.
+fn install_target(
+    state: &AppState,
+    app_name: &str,
+    requested: Option<&str>,
+    title: &str,
+) -> PathBuf {
+    let default_root = state
+        .storage
+        .get_settings()
+        .map(|s| PathBuf::from(s.default_install_dir))
+        .unwrap_or_default();
+    let existing = state
+        .storage
+        .get_installed_game(app_name)
+        .ok()
+        .flatten()
+        .map(|g| PathBuf::from(g.install_path));
+    crate::installer::resolve_install_dir(requested, &default_root, title, existing.as_deref())
 }
 
 /// Headless install engine: Valve's SteamCMD, driven with the user's Steam
@@ -1283,11 +1292,7 @@ async fn start_steamcmd_download(
     credentials: Option<SteamCredentials>,
     state: &Arc<AppState>,
 ) -> Result<()> {
-    let settings = state.storage.get_settings()?;
-
-    let target_dir = install_dir.map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(&settings.default_install_dir).join(clean_steam_title(&title))
-    });
+    let target_dir = install_target(state, &format!("steam_{}", app_id), install_dir.as_deref(), &title);
 
     state
         .steam_downloader
@@ -1410,22 +1415,7 @@ pub async fn game_install(
     let manifest = Manifest::parse(&manifest_bytes)?;
 
     // 3. Determine target directory
-    let target_dir = if let Some(custom) = install_dir {
-        PathBuf::from(custom)
-    } else {
-        let clean_title = game
-            .title
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == ' ' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        PathBuf::from(&settings.default_install_dir).join(clean_title)
-    };
+    let target_dir = install_target(&state, &game.app_name, install_dir.as_deref(), &game.title);
 
     let executable = if !manifest.meta.launch_exe.is_empty() {
         manifest.meta.launch_exe.clone()
@@ -1465,6 +1455,7 @@ pub async fn game_install(
             game.app_name,
             game.title,
             manifest,
+            manifest_bytes,
             base_url,
             state.api_client.get_session().await.map(|s| s.access_token),
             target_dir,
@@ -1946,31 +1937,9 @@ pub async fn game_install_custom_manifest(
         )
     })?;
 
-    // 6. Determine target install directory. A bare library root gets the game's
-    //    own folder, so a build never unpacks into <root> itself.
-    let clean_title = title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let default_root = PathBuf::from(&settings.default_install_dir);
-
-    let target_dir = match request.install_dir.filter(|s| !s.trim().is_empty()) {
-        Some(custom) => {
-            let custom = PathBuf::from(custom.trim());
-            if paths_equal(&custom, &default_root) {
-                custom.join(&clean_title)
-            } else {
-                custom
-            }
-        }
-        None => default_root.join(&clean_title),
-    };
+    // 6. Determine target install directory. A library root or someone else's
+    //    folder gets the game's own subfolder, so a build never unpacks into it.
+    let target_dir = install_target(&state, &app_name, request.install_dir.as_deref(), &title);
 
     let executable = if !manifest.meta.launch_exe.is_empty() {
         manifest.meta.launch_exe.clone()
@@ -2016,6 +1985,7 @@ pub async fn game_install_custom_manifest(
             app_name,
             title,
             manifest,
+            manifest_bytes,
             base_url,
             epic_token,
             target_dir,
@@ -2041,20 +2011,13 @@ pub async fn game_cancel_download(
         }
     }
 
-    // 1. Tell downloader to cancel active download
+    // 1. Stop the active download. The pipeline itself removes a fresh
+    //    install's partial folder; an existing install is never touched here —
+    //    cancelling an update (or dismissing a finished entry) used to delete
+    //    the whole working game.
     let _ = state.downloader.cancel_download(&app_name).await;
 
-    // 2. If it was registered in SQLite or has partial files, clean it up completely
-    if let Ok(Some(installed)) = state.storage.get_installed_game(&app_name) {
-        let _ = state.storage.delete_installed_game(&app_name);
-        let path = std::path::PathBuf::from(&installed.install_path);
-        if path.exists() {
-            let _ = std::fs::remove_file(path.join(".hyperion_resume.txt"));
-            let _ = std::fs::remove_dir_all(&path);
-        }
-    }
-
-    // 3. Emit progress as cancelled to frontend
+    // 2. Emit progress as cancelled to frontend
     let p = DownloadProgress {
         app_name: app_name.clone(),
         title: app_name.clone(),
@@ -2148,8 +2111,25 @@ pub async fn game_uninstall(app_name: String, state: State<'_, Arc<AppState>>) -
         .get_installed_game(&app_name)?
         .ok_or_else(|| AppError::Install(format!("Game {} is not installed", app_name)))?;
 
-    Installer::uninstall_game(&installed)?;
+    // Library roots and every other game's folder are off limits for a
+    // whole-folder delete (an install that landed in a shared folder).
+    let mut protected: Vec<PathBuf> = state
+        .storage
+        .get_all_installed_games()?
+        .into_iter()
+        .filter(|g| g.app_name != app_name && !g.install_path.trim().is_empty())
+        .map(|g| PathBuf::from(g.install_path))
+        .collect();
+    if let Ok(settings) = state.storage.get_settings() {
+        protected.push(PathBuf::from(settings.default_install_dir));
+    }
+
+    let manifest = crate::manifest_cache::read_installed(&app_name)
+        .and_then(|bytes| Manifest::parse(&bytes).ok());
+
+    Installer::uninstall_game(&installed, manifest.as_ref(), &protected)?;
     state.storage.delete_installed_game(&app_name)?;
+    crate::manifest_cache::remove_installed(&app_name);
     Ok(())
 }
 
@@ -2297,16 +2277,6 @@ async fn register_running_game(
         .insert(app_name.to_string(), entry);
 
     info!("Tracking running game {} (pid {})", app_name, pid);
-}
-
-/// Compares two directories ignoring case and trailing separators.
-fn paths_equal(a: &std::path::Path, b: &std::path::Path) -> bool {
-    fn normalise(path: &std::path::Path) -> String {
-        path.to_string_lossy()
-            .trim_end_matches(|c| c == '\\' || c == '/')
-            .to_string()
-    }
-    normalise(a).eq_ignore_ascii_case(&normalise(b))
 }
 
 /// Finds a process whose executable lives inside `dir`.
@@ -2560,8 +2530,6 @@ pub async fn steam_install_custom(
     manifest_id: Option<u64>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<()> {
-    let settings = state.storage.get_settings()?;
-
     let final_title = if let Some(t) = title {
         t
     } else {
@@ -2571,22 +2539,14 @@ pub async fn steam_install_custom(
         }
     };
 
-    let clean_title = final_title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-
-    let target_dir = if let Some(custom) = install_dir {
-        PathBuf::from(custom)
-    } else {
-        PathBuf::from(&settings.default_install_dir).join(clean_title)
-    };
+    // The Direct Downloader pre-fills the bare library root; installing there
+    // made a later uninstall wipe every game in it.
+    let target_dir = install_target(
+        &state,
+        &format!("steam_{}", app_id),
+        install_dir.as_deref(),
+        &final_title,
+    );
 
     info!(
         "Initiating native Steam in-launcher download for AppID {} ('{}')",
@@ -2715,11 +2675,11 @@ mod game_process_tests {
 
     #[test]
     fn install_paths_compare_case_and_separator_insensitively() {
-        assert!(paths_equal(
+        assert!(crate::installer::same_dir(
             std::path::Path::new("D:\\Games\\Dauntless"),
             std::path::Path::new("d:\\games\\dauntless\\")
         ));
-        assert!(!paths_equal(
+        assert!(!crate::installer::same_dir(
             std::path::Path::new("D:\\Games\\Dauntless"),
             std::path::Path::new("D:\\Games\\Other")
         ));

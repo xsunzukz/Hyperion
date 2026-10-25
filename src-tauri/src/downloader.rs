@@ -1,6 +1,7 @@
 use crate::chunk::Chunk;
 use crate::error::{AppError, Result};
-use crate::manifest::{ChunkInfo, Manifest};
+use crate::installer::{safe_join, same_dir, Installer, RESUME_JOURNAL};
+use crate::manifest::{ChunkInfo, FileManifest, Manifest};
 use crate::models::{DownloadProgress, DownloadStatus, InstalledGame};
 use crate::storage::Storage;
 use reqwest::Client;
@@ -123,6 +124,8 @@ impl DownloadManager {
         app_name: String,
         title: String,
         manifest: Manifest,
+        // The raw manifest, kept beside the install once it completes
+        manifest_bytes: Vec<u8>,
         base_url: String,
         // Epic OAuth token, attached only to Epic CDN requests
         auth_token: Option<String>,
@@ -131,6 +134,15 @@ impl DownloadManager {
         installed_game: Option<InstalledGame>,
         storage: Arc<Storage>,
     ) -> Result<()> {
+        // A second pipeline for the same app would write the same files in
+        // parallel and leave the first one unreachable for cancel.
+        if self.active_downloads.lock().await.contains_key(&app_name) {
+            return Err(AppError::Download(format!(
+                "{} is already downloading",
+                title
+            )));
+        }
+
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let pause_flag = Arc::new(AtomicBool::new(false));
 
@@ -182,6 +194,7 @@ impl DownloadManager {
                     app_name_clone.clone(),
                     title.clone(),
                     manifest,
+                    manifest_bytes,
                     base_url,
                     auth_token,
                     target_dir,
@@ -218,6 +231,7 @@ impl DownloadManager {
         app_name: String,
         _title: String,
         manifest: Manifest,
+        manifest_bytes: Vec<u8>,
         base_url: String,
         auth_token: Option<String>,
         target_dir: PathBuf,
@@ -228,36 +242,93 @@ impl DownloadManager {
         installed_game: Option<InstalledGame>,
         storage: Arc<Storage>,
     ) -> Result<()> {
-        // 1. Create installation directory
-        std::fs::create_dir_all(&target_dir)?;
-
-        // 2. Read resume file if exists
-        let resume_path = target_dir.join(".hyperion_resume.txt");
-        let completed_files: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-
-        if resume_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&resume_path) {
-                let mut set = completed_files.lock().await;
-                for line in content.lines() {
-                    let parts: Vec<&str> = line.splitn(2, ':').collect();
-                    if parts.len() == 2 {
-                        let rel_path = parts[1].trim();
-                        let full = target_dir.join(rel_path);
-                        if full.exists() {
-                            set.insert(rel_path.to_string());
-                        }
-                    }
-                }
-                info!(
-                    "Found {} previously completed files from resume journal",
-                    set.len()
-                );
-            }
+        // 0. Every file must land inside the install folder. A crafted manifest
+        //    is refused before anything is created or written.
+        let mut file_paths = Vec::with_capacity(manifest.file_manifest_list.len());
+        for fm in &manifest.file_manifest_list {
+            file_paths.push(safe_join(&target_dir, &fm.filename)?);
+        }
+        if !manifest.meta.launch_exe.is_empty() {
+            safe_join(&target_dir, &manifest.meta.launch_exe)?;
         }
 
-        // 3. Filter files and build chunk requirements
+        // 1. Create installation directory, remembering whether this run made it:
+        //    only a folder we created may be removed again on cancel.
+        let created_dir = !target_dir.exists();
+        std::fs::create_dir_all(&target_dir)?;
+
+        // 2. Decide which files are already on disk and correct. The journal
+        //    is only a shortcut: a file is skipped when its recorded hash is the
+        //    one this manifest wants, or — for files the journal does not vouch
+        //    for (a crash, an older build, a folder installed by another tool) —
+        //    when its contents actually hash to it. Existence alone proves nothing:
+        //    updates and reinstalls used to keep every old or corrupt file.
+        let resume_path = target_dir.join(RESUME_JOURNAL);
+        let journal = read_journal(&resume_path);
+        let checks: Vec<(PathBuf, u64, [u8; 20], bool)> = manifest
+            .file_manifest_list
+            .iter()
+            .zip(&file_paths)
+            .map(|(fm, path)| {
+                let vouched = journal.get(&fm.filename.to_ascii_lowercase())
+                    == Some(&hex::encode(fm.hash));
+                (path.clone(), fm.file_size, fm.hash, vouched)
+            })
+            .collect();
+        let cancel_check = cancel_flag.clone();
+        let already_done: Vec<bool> = tokio::task::spawn_blocking(move || {
+            checks
+                .into_iter()
+                .map(|(path, size, hash, vouched)| {
+                    if cancel_check.load(Ordering::SeqCst) {
+                        return false;
+                    }
+                    let Ok(meta) = std::fs::metadata(&path) else {
+                        return false;
+                    };
+                    if !meta.is_file() || meta.len() != size {
+                        return false;
+                    }
+                    vouched || Installer::compute_file_sha1(&path).is_ok_and(|h| h == hash)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|e| AppError::Download(format!("Could not check existing files: {}", e)))?;
+
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err(AppError::Download("Download cancelled by user".to_string()));
+        }
+
+        // The journal is rewritten to vouch only for files just confirmed, so it
+        // never claims a file this run is about to overwrite.
+        let journal_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&resume_path)?;
+        let journal_file = Arc::new(std::sync::Mutex::new(journal_file));
+        {
+            let mut jf = journal_file.lock().unwrap();
+            for (fm, done) in manifest.file_manifest_list.iter().zip(&already_done) {
+                if *done {
+                    writeln!(jf, "{}:{}", hex::encode(fm.hash), fm.filename)?;
+                }
+            }
+        }
+        let skipped = already_done.iter().filter(|d| **d).count();
+        if skipped > 0 {
+            info!(
+                "{} of {} files are already correct on disk",
+                skipped,
+                manifest.file_manifest_list.len()
+            );
+        }
+
+        // 3. Build chunk requirements for the files still needed
         #[derive(Clone)]
         struct ChunkRef {
+            file_idx: usize,
             file_path: PathBuf,
             chunk_offset: u32,
             size: u32,
@@ -266,30 +337,41 @@ impl DownloadManager {
 
         let mut chunk_refs: HashMap<[u32; 4], Vec<ChunkRef>> = HashMap::new();
         let mut files_to_create = Vec::new();
+        // (journal line, parts still to write) for every file being written
+        let mut journal_lines: Vec<String> = Vec::new();
+        let mut parts_left: Vec<AtomicU64> = Vec::new();
 
+        for ((fm, full_path), done) in manifest
+            .file_manifest_list
+            .iter()
+            .zip(&file_paths)
+            .zip(&already_done)
         {
-            let done = completed_files.lock().await;
-            for fm in &manifest.file_manifest_list {
-                if done.contains(&fm.filename) {
-                    continue;
-                }
+            if *done {
+                continue;
+            }
 
-                let full_path = target_dir.join(&fm.filename);
-                files_to_create.push((full_path.clone(), fm.file_size));
+            let file_idx = journal_lines.len();
+            journal_lines.push(format!("{}:{}", hex::encode(fm.hash), fm.filename));
+            parts_left.push(AtomicU64::new(fm.chunk_parts.len() as u64));
+            files_to_create.push((full_path.clone(), fm.file_size, fm.chunk_parts.is_empty()));
 
-                for part in &fm.chunk_parts {
-                    chunk_refs.entry(part.guid).or_default().push(ChunkRef {
-                        file_path: full_path.clone(),
-                        chunk_offset: part.offset,
-                        size: part.size,
-                        file_offset: part.file_offset,
-                    });
-                }
+            for part in &fm.chunk_parts {
+                chunk_refs.entry(part.guid).or_default().push(ChunkRef {
+                    file_idx,
+                    file_path: full_path.clone(),
+                    chunk_offset: part.offset,
+                    size: part.size,
+                    file_offset: part.file_offset,
+                });
             }
         }
+        let journal_lines = Arc::new(journal_lines);
+        let parts_left = Arc::new(parts_left);
 
-        // 4. Pre-create directories and target files with exact sizes
-        for (fp, size) in &files_to_create {
+        // 4. Pre-create directories and target files with exact sizes. A failing
+        //    `set_len` (a full disk) stops here instead of hours into the download.
+        for (fp, size, _) in &files_to_create {
             if let Some(parent) = fp.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -298,15 +380,33 @@ impl DownloadManager {
                 .create(true)
                 .truncate(false)
                 .open(fp)?;
-            let _ = f.set_len(*size);
+            f.set_len(*size).map_err(|e| {
+                AppError::Io(format!("Could not allocate {}: {}", fp.display(), e))
+            })?;
+        }
+        // Empty files are complete as soon as they exist
+        {
+            let mut jf = journal_file.lock().unwrap();
+            for (idx, (_, _, no_parts)) in files_to_create.iter().enumerate() {
+                if *no_parts {
+                    writeln!(jf, "{}", journal_lines[idx])?;
+                }
+            }
         }
 
-        // 5. Build list of needed chunks
+        // 5. Build list of needed chunks. A file part pointing at a chunk the
+        //    manifest does not list would silently stay zero-filled.
         let needed_chunks: Vec<ChunkInfo> = manifest
             .chunk_data_list
             .into_iter()
             .filter(|c| chunk_refs.contains_key(&c.guid))
             .collect();
+        if needed_chunks.len() != chunk_refs.len() {
+            return Err(AppError::Manifest(format!(
+                "Manifest is inconsistent: {} file parts reference chunks it does not list",
+                chunk_refs.len() - needed_chunks.len()
+            )));
+        }
 
         let total_needed_chunks = needed_chunks.len() as u64;
         let total_needed_bytes: u64 = needed_chunks.iter().map(|c| c.window_size as u64).sum();
@@ -321,6 +421,9 @@ impl DownloadManager {
 
         let workers = max_workers.clamp(1, 64);
         let semaphore = Arc::new(Semaphore::new(workers));
+        // Set when any chunk fails, so already-spawned workers stop instead of
+        // writing on in the background after the download has been reported.
+        let halt = Arc::new(AtomicBool::new(false));
         let downloaded_bytes = Arc::new(AtomicU64::new(0));
         let downloaded_chunks = Arc::new(AtomicU64::new(0));
 
@@ -356,14 +459,21 @@ impl DownloadManager {
             let downloaded_bytes = downloaded_bytes.clone();
             let downloaded_chunks = downloaded_chunks.clone();
             let tx = tx.clone();
-            let cancel = cancel_flag.clone();
+            let cancel_flag_task = cancel_flag.clone();
+            let halt_task = halt.clone();
+            let cancel = move || {
+                cancel_flag_task.load(Ordering::SeqCst) || halt_task.load(Ordering::SeqCst)
+            };
             let pause = pause_flag.clone();
+            let journal_file = journal_file.clone();
+            let journal_lines = journal_lines.clone();
+            let parts_left = parts_left.clone();
 
             tokio::spawn(async move {
                 // If paused, wait before acquiring permit
                 while pause.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    if cancel.load(Ordering::SeqCst) {
+                    if cancel() {
                         return;
                     }
                 }
@@ -373,14 +483,14 @@ impl DownloadManager {
                     Err(_) => return,
                 };
 
-                if cancel.load(Ordering::SeqCst) {
+                if cancel() {
                     return;
                 }
 
                 // If paused while waiting for permit, wait again
                 while pause.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(250)).await;
-                    if cancel.load(Ordering::SeqCst) {
+                    if cancel() {
                         return;
                     }
                 }
@@ -394,7 +504,7 @@ impl DownloadManager {
                 // request sharing the executor and capped real throughput.
                 let mut raw_chunk = None;
                 for retry in 0..3 {
-                    if cancel.load(Ordering::SeqCst) {
+                    if cancel() {
                         return;
                     }
 
@@ -434,7 +544,7 @@ impl DownloadManager {
                     tokio::time::sleep(Duration::from_millis(200 * (retry + 1))).await;
                 }
 
-                if cancel.load(Ordering::SeqCst) {
+                if cancel() {
                     return;
                 }
 
@@ -473,6 +583,14 @@ impl DownloadManager {
                         }
                         write_at(&r.file_path, &chunk.data[slice_start..slice_end], r.file_offset)
                             .map_err(|e| format!("could not write {:?}: {}", r.file_path, e))?;
+
+                        // Last part of this file written: journal it now, so a
+                        // crash or kill resumes from here rather than from zero.
+                        if parts_left[r.file_idx].fetch_sub(1, Ordering::SeqCst) == 1 {
+                            if let Ok(mut jf) = journal_file.lock() {
+                                let _ = writeln!(jf, "{}", journal_lines[r.file_idx]);
+                            }
+                        }
                     }
 
                     Ok(())
@@ -517,7 +635,10 @@ impl DownloadManager {
                 break;
             }
 
-            res?;
+            if let Err(e) = res {
+                halt.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
             chunks_completed += 1;
 
             let now = Instant::now();
@@ -563,7 +684,27 @@ impl DownloadManager {
             p.speed_bytes_per_sec = 0;
             p.eta_seconds = 0;
             let _ = app_handle.emit("download-progress", p.clone());
-            let _ = std::fs::remove_file(&resume_path);
+            drop(p);
+
+            // A fresh install's folder is removed again — once in-flight workers
+            // have let go of it. A folder that existed before (an update, a
+            // resumed install, a folder the user picked) is left alone: its
+            // journal stays accurate, so the next attempt resumes.
+            if created_dir {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    semaphore.acquire_many(workers as u32),
+                )
+                .await;
+                drop(journal_file);
+                if let Err(e) = std::fs::remove_dir_all(&target_dir) {
+                    warn!(
+                        "Could not remove the cancelled install at {}: {}",
+                        target_dir.display(),
+                        e
+                    );
+                }
+            }
             return Err(AppError::Download("Download cancelled by user".to_string()));
         }
 
@@ -594,7 +735,24 @@ impl DownloadManager {
             let _ = app_handle.emit("download-progress", p.clone());
         }
 
-        // Save resume journal
+        // Files the previous build had and this one dropped are deleted, so an
+        // update leaves exactly this build behind, not a mix of both.
+        let previous = storage
+            .get_installed_game(&app_name)
+            .ok()
+            .flatten()
+            .filter(|g| same_dir(std::path::Path::new(&g.install_path), &target_dir))
+            .and_then(|_| crate::manifest_cache::read_installed(&app_name))
+            .and_then(|bytes| Manifest::parse(&bytes).ok());
+        if let Some(previous) = previous {
+            let removed = remove_stale_files(&target_dir, &previous, &manifest.file_manifest_list);
+            if removed > 0 {
+                info!("Removed {} files the new build no longer ships", removed);
+            }
+        }
+
+        // Compact the journal to exactly this build
+        drop(journal_file);
         if let Ok(mut rf) = OpenOptions::new()
             .create(true)
             .write(true)
@@ -604,6 +762,12 @@ impl DownloadManager {
             for fm in &manifest.file_manifest_list {
                 let _ = writeln!(rf, "{}:{}", hex::encode(fm.hash), fm.filename);
             }
+        }
+
+        // The exact manifest this install came from: verify, repair, updates and
+        // uninstall work from it instead of whatever is published today.
+        if let Err(e) = crate::manifest_cache::write_installed(&app_name, &manifest_bytes) {
+            warn!("Could not keep the manifest for {}: {}", app_name, e);
         }
 
         // SAVE TO SQLITE DATABASE NOW THAT DOWNLOAD IS ACTUALLY COMPLETE!
@@ -626,6 +790,103 @@ impl DownloadManager {
 
         info!("Installation completed successfully for {}", app_name);
         Ok(())
+    }
+}
+
+/// `filename -> sha1 hex` from a resume journal (lower-cased names; the last
+/// line for a file wins, since completed files are appended as they finish).
+fn read_journal(path: &std::path::Path) -> HashMap<String, String> {
+    let mut entries = HashMap::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            if let Some((hash, name)) = line.split_once(':') {
+                let name = name.trim();
+                if !name.is_empty() {
+                    entries.insert(name.to_ascii_lowercase(), hash.trim().to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// Deletes files `previous` installed that `current` no longer has, plus any
+/// folders that leaves empty. Returns how many files were removed.
+fn remove_stale_files(
+    install_dir: &std::path::Path,
+    previous: &Manifest,
+    current: &[FileManifest],
+) -> usize {
+    let key = |name: &str| name.replace('\\', "/").to_ascii_lowercase();
+    let keep: HashSet<String> = current
+        .iter()
+        .map(|f| key(&f.filename))
+        .collect();
+
+    let mut removed = 0;
+    for old in &previous.file_manifest_list {
+        if keep.contains(&key(&old.filename)) {
+            continue;
+        }
+        let Ok(path) = safe_join(install_dir, &old.filename) else {
+            continue;
+        };
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            let mut dir = path.parent();
+            while let Some(d) = dir {
+                if same_dir(d, install_dir) || std::fs::remove_dir(d).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
+    }
+    removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str) -> FileManifest {
+        FileManifest {
+            filename: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn journal_keeps_the_latest_hash_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RESUME_JOURNAL);
+        std::fs::write(&path, "aa:Bin/Game.exe\nbb:Content/a.pak\ncc:bin/game.exe\nnot a line\n").unwrap();
+
+        let journal = read_journal(&path);
+        assert_eq!(journal.get("bin/game.exe").map(String::as_str), Some("cc"));
+        assert_eq!(journal.get("content/a.pak").map(String::as_str), Some("bb"));
+        assert_eq!(journal.len(), 2);
+        assert!(read_journal(&dir.path().join("missing.txt")).is_empty());
+    }
+
+    #[test]
+    fn update_removes_only_files_the_new_build_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Old")).unwrap();
+        std::fs::create_dir_all(root.join("Bin")).unwrap();
+        std::fs::write(root.join("Old/gone.pak"), b"x").unwrap();
+        std::fs::write(root.join("Bin/game.exe"), b"x").unwrap();
+        std::fs::write(root.join("Bin/user.ini"), b"mine").unwrap();
+
+        let mut previous = Manifest::default();
+        previous.file_manifest_list = vec![file("Old/gone.pak"), file("Bin/game.exe"), file("../outside.txt")];
+        let current = vec![file("bin\\GAME.exe")];
+
+        assert_eq!(remove_stale_files(root, &previous, &current), 1);
+        assert!(!root.join("Old").exists());
+        assert!(root.join("Bin/game.exe").exists());
+        assert!(root.join("Bin/user.ini").exists());
     }
 }
 

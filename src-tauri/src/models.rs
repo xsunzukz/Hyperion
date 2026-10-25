@@ -126,7 +126,7 @@ fn default_platform() -> String {
 }
 
 /// Locally installed game record
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstalledGame {
     pub app_name: String,
     pub title: String,

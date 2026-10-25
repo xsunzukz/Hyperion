@@ -19,7 +19,9 @@ impl Launcher {
     ) -> Result<u32> {
         let install_path = Path::new(&game.install_path);
         let exe_rel = game.executable.trim_start_matches(['/', '\\']);
-        let exe_path = install_path.join(exe_rel);
+        // The executable name comes from the manifest: never run anything
+        // outside the install folder.
+        let exe_path = crate::installer::safe_join(install_path, exe_rel)?;
 
         if !exe_path.exists() {
             return Err(AppError::Launch(format!(
