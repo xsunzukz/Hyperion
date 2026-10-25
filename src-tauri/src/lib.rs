@@ -62,6 +62,7 @@ pub fn run() {
             commands::auth_logout,
             commands::auth_get_profile,
             commands::catalog_get_games,
+            commands::app_bootstrap,
             commands::catalog_get_game_details,
             commands::game_install,
             commands::game_cancel_download,

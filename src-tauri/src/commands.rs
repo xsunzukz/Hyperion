@@ -831,11 +831,154 @@ fn dedupe_games(games: Vec<GameItem>) -> Vec<GameItem> {
         .collect()
 }
 
+/// One step of the startup flow, streamed to the boot screen.
+#[derive(Clone, serde::Serialize)]
+pub struct BootstrapProgress {
+    pub stage: String,
+    pub label: String,
+    pub detail: Option<String>,
+    /// `None` means "working, but no meaningful percentage" (e.g. an archive download).
+    pub percent: Option<f32>,
+    pub finished: bool,
+}
+
+/// What the boot screen reports once everything is ready.
+#[derive(Clone, serde::Serialize)]
+pub struct BootstrapReport {
+    pub epic_games: usize,
+    pub steam_games: usize,
+    pub steamcmd_ready: bool,
+    pub first_run: bool,
+}
+
+/// First-launch bootstrap: runtime files, SteamCMD, then the whole library.
+///
+/// Emits `bootstrap-progress` events so the splash screen can show real stages
+/// instead of a spinner that means nothing. SteamCMD is only installed on a first
+/// run (or when it is missing) — later launches go straight to the library.
+#[tauri::command]
+pub async fn app_bootstrap(
+    force: bool,
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<BootstrapReport> {
+    let mut settings = state.storage.get_settings()?;
+    let first_run = force || !settings.bootstrap_done;
+
+    let emit = |stage: &str, label: &str, detail: Option<String>, percent: Option<f32>, finished: bool| {
+        let _ = app_handle.emit(
+            "bootstrap-progress",
+            BootstrapProgress {
+                stage: stage.to_string(),
+                label: label.to_string(),
+                detail,
+                percent,
+                finished,
+            },
+        );
+    };
+
+    emit(
+        "files",
+        "Preparing Hyperion",
+        Some("Checking local runtime files".to_string()),
+        Some(0.0),
+        false,
+    );
+
+    let mut steamcmd_ready = crate::steam::downloader::SteamDownloadManager::steamcmd_installed();
+
+    if first_run && !steamcmd_ready {
+        emit(
+            "steamcmd",
+            "Installing SteamCMD",
+            Some("Downloading Valve's official engine without admin rights".to_string()),
+            None,
+            false,
+        );
+
+        match crate::steam::downloader::SteamDownloadManager::ensure_steamcmd().await {
+            Ok(_) => {
+                steamcmd_ready = true;
+                emit(
+                    "steamcmd",
+                    "SteamCMD ready",
+                    Some("Installed into your local app data".to_string()),
+                    Some(100.0),
+                    false,
+                );
+            }
+            Err(e) => {
+                // Not fatal: Epic downloads keep working, Steam installs will retry.
+                warn!("SteamCMD install failed during bootstrap: {}", e);
+                emit(
+                    "steamcmd",
+                    "SteamCMD skipped",
+                    Some(format!("{} — Steam downloads will retry later", e)),
+                    Some(100.0),
+                    false,
+                );
+            }
+        }
+    } else {
+        emit(
+            "steamcmd",
+            "SteamCMD already installed",
+            None,
+            Some(100.0),
+            false,
+        );
+    }
+
+    emit(
+        "library",
+        "Loading your library",
+        Some("Reading the cached Epic catalog".to_string()),
+        None,
+        false,
+    );
+
+    let games = load_catalog(&state, false).await?;
+    let steam_games = games.iter().filter(|game| game.platform == "steam").count();
+    let epic_games = games.len().saturating_sub(steam_games);
+
+    emit(
+        "library",
+        "Library ready",
+        Some(format!("{} Epic · {} Steam titles", epic_games, steam_games)),
+        Some(100.0),
+        false,
+    );
+
+    if !settings.bootstrap_done {
+        settings.bootstrap_done = true;
+        if let Err(e) = state.storage.save_settings(&settings) {
+            warn!("Could not persist the bootstrap flag: {}", e);
+        }
+    }
+
+    emit("done", "Starting Hyperion", None, Some(100.0), true);
+
+    Ok(BootstrapReport {
+        epic_games,
+        steam_games,
+        steamcmd_ready,
+        first_run,
+    })
+}
+
 #[tauri::command]
 pub async fn catalog_get_games(
     force_refresh: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<GameItem>> {
+    load_catalog(&state, force_refresh).await
+}
+
+/// Builds the launcher library: cached Epic catalog first, then installed titles
+/// and the Steam library. Shared by the UI command and the startup bootstrap so
+/// the first screen and the library cannot disagree.
+async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameItem>> {
     let settings = state.storage.get_settings()?;
     let installed_games = state.storage.get_all_installed_games()?;
     let installed_map: std::collections::HashMap<String, InstalledGame> = installed_games

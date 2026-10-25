@@ -235,6 +235,11 @@ static STEAMCMD_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 const STEAMCMD_ZIP_URL: &str = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip";
 
 impl SteamDownloadManager {
+    /// True when the engine is already installed for this user.
+    pub fn steamcmd_installed() -> bool {
+        Self::steamcmd_dir().join("steamcmd.exe").exists()
+    }
+
     /// Ensures that official Valve steamcmd.exe is downloaded and extracted
     pub async fn ensure_steamcmd() -> Result<PathBuf, String> {
         let steamcmd_dir = Self::steamcmd_dir();

@@ -147,6 +147,25 @@ export interface AppSettings {
   steam_token?: string;
   /** Opt-in: read this PC's Steam library files to list Steam games */
   steam_library_scan: boolean;
+  /** Set by the backend once the first-launch bootstrap has finished */
+  bootstrap_done: boolean;
+}
+
+/** One stage of the startup bootstrap, streamed while the splash is visible */
+export interface BootstrapProgress {
+  stage: string;
+  label: string;
+  detail?: string | null;
+  /** null means "working, no meaningful percentage" */
+  percent?: number | null;
+  finished: boolean;
+}
+
+export interface BootstrapReport {
+  epic_games: number;
+  steam_games: number;
+  steamcmd_ready: boolean;
+  first_run: boolean;
 }
 
 export interface SystemDiagnostics {

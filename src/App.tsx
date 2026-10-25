@@ -7,6 +7,7 @@ import { DownloadsView } from './components/DownloadsView';
 import { CloudSavesView } from './components/CloudSavesView';
 import { SettingsView } from './components/SettingsView';
 import { AboutView } from './components/AboutView';
+import { BootScreen } from './components/BootScreen';
 import { LoginModal } from './components/LoginModal';
 import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
@@ -84,6 +85,8 @@ export const App: React.FC = () => {
   // Steam connected but the local library scan is off -> titles are hidden
   const [steamLibraryHint, setSteamLibraryHint] = useState<AppSettings | null>(null);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  // Startup splash: staged bootstrap (files -> SteamCMD -> library), then the shell.
+  const [booted, setBooted] = useState(false);
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
@@ -236,8 +239,10 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
+    // The bootstrap already warmed the library; wait for the splash to finish.
+    if (!booted) return;
     loadGames(false);
-  }, [user]);
+  }, [user, booted]);
 
   // Opens the in-app Steam sign-in prompt and remembers which download to resume
   const requestSteamAuth = async (mode: 'full' | 'guard', appName: string, title: string) => {
@@ -510,6 +515,10 @@ export const App: React.FC = () => {
   );
 
   const runningGamesList = useMemo(() => Object.values(runningGames), [runningGames]);
+
+  if (!booted) {
+    return <BootScreen onDone={() => setBooted(true)} />;
+  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#050507] text-white select-none">

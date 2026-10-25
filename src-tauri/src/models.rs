@@ -250,6 +250,10 @@ pub struct AppSettings {
     /// default.
     #[serde(default)]
     pub steam_library_scan: bool,
+    /// Set once the first-launch bootstrap (runtime files → SteamCMD → library)
+    /// has finished, so the splash screen only does the heavy work once.
+    #[serde(default)]
+    pub bootstrap_done: bool,
 }
 
 /// Automatically detects a suitable root gaming drive (D:\Games, E:\Games, or C:\Games)
@@ -278,6 +282,7 @@ impl Default for AppSettings {
             steam_token: None,
             steam_password_enc: None,
             steam_library_scan: false,
+            bootstrap_done: false,
         }
     }
 }

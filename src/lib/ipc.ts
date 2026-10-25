@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import {
   AppSettings,
+  BootstrapProgress,
+  BootstrapReport,
   CloudSaveState,
   CustomInstallRequest,
   DownloadProgress,
@@ -165,6 +167,7 @@ let mockSettings: AppSettings = {
   skip_update_check: false,
   platform: 'Windows',
   steam_library_scan: false,
+  bootstrap_done: false,
 };
 
 let mockDownloads: DownloadProgress[] = [];
@@ -285,6 +288,32 @@ export const catalogGetGames = async (forceRefresh = false): Promise<GameItem[]>
     return invoke<GameItem[]>('catalog_get_games', { forceRefresh });
   }
   return [...mockGames];
+};
+
+/**
+ * First-launch bootstrap: runtime files, SteamCMD, then the library.
+ * Progress arrives on `bootstrap-progress`.
+ */
+export const appBootstrap = async (force = false): Promise<BootstrapReport> => {
+  if (isTauri()) {
+    return invoke<BootstrapReport>('app_bootstrap', { force });
+  }
+  // Browser preview has nothing to install; report the mock library instead.
+  return {
+    epic_games: mockGames.filter((g) => (g.platform || 'epic') !== 'steam').length,
+    steam_games: mockGames.filter((g) => g.platform === 'steam').length,
+    steamcmd_ready: true,
+    first_run: false,
+  };
+};
+
+export const listenToBootstrapProgress = async (
+  callback: (event: { payload: BootstrapProgress }) => void
+): Promise<UnlistenFn> => {
+  if (isTauri()) {
+    return listen<BootstrapProgress>('bootstrap-progress', callback);
+  }
+  return () => {};
 };
 
 export const catalogGetGameDetails = async (appName: string): Promise<GameItem | null> => {
