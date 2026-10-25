@@ -77,7 +77,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Steam state: the account detected on this PC, and whether the headless
+  // Steam state: the account signed in with, and whether the headless
   // engine already holds a session that authorises downloads.
   const [currentSteamStatus, setCurrentSteamStatus] = useState<SteamAuthStatus | null>(null);
   const [steamCredentials, setSteamCredentials] = useState<SteamCredentialStatus | null>(null);
@@ -328,7 +328,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           {/* ======================================================== */}
           {platformTab === 'steam' ? (
             <div className="space-y-4">
-              {/* Detected account + authorisation state */}
+              {/* Signed-in account and authorisation state */}
               <div className="p-4 rounded-2xl bg-zinc-900/60 border border-zinc-800 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
                   <div
@@ -344,12 +344,12 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   </div>
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white truncate">
-                      {steamAccount || 'No Steam account detected'}
+                      {steamAccount || 'Not signed in'}
                     </div>
                     <div className="text-[11px] text-zinc-400 truncate">
                       {steamAuthorized
                         ? 'Downloads authorised — session cached on this PC'
-                        : 'Account detected, downloads not authorised yet'}
+                        : 'Signed in, downloads not authorised yet'}
                     </div>
                   </div>
                 </div>

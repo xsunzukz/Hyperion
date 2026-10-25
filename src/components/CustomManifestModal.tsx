@@ -600,7 +600,7 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
               </div>
             </div>
 
-            {/* Steam Token Authentication Status */}
+            {/* Steam session status */}
             {steamAuth?.logged_in ? (
               <div className="p-4 rounded-2xl bg-zinc-900/60 border border-sky-500/30 space-y-2">
                 <div className="flex items-center justify-between">
@@ -612,11 +612,12 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
                       <div className="text-xs font-bold text-white flex items-center gap-2">
                         <span>Steam Account: {steamAuth.account_name || 'Active User'}</span>
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-sky-500/20 text-sky-300 border border-sky-500/30">
-                          TOKEN AUTHENTICATED
+                          SIGNED IN
                         </span>
                       </div>
                       <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
-                        SteamID: {steamAuth.steam_id || 'Detected'} • Downloads authenticate automatically
+                        {steamAuth.steam_id ? `SteamID: ${steamAuth.steam_id} • ` : ''}
+                        Downloads authenticate automatically
                       </div>
                     </div>
                   </div>
@@ -640,7 +641,7 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
                       <span>Steam Session: Anonymous Mode</span>
                     </div>
                     <div className="text-[11px] text-zinc-500 mt-0.5">
-                      Free games download anonymously. For paid/owned games, connect your Steam token.
+                      Free games download anonymously. For paid/owned games, sign in with Steam.
                     </div>
                   </div>
 

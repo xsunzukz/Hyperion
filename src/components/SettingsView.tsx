@@ -287,17 +287,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* Steam Token Authentication Card - ZERO ID/PASSWORD INPUTS */}
+        {/* Steam account card */}
         <div className="p-6 rounded-2xl glass-panel border border-sky-500/30 bg-zinc-950/80 space-y-4 shadow-lg shadow-sky-950/20">
           <div className="flex items-center justify-between">
             <label className="flex items-center gap-2.5 text-sm font-bold text-white">
               <SteamIcon className="w-4 h-4 text-sky-400" />
-              <span>Steam Token Authentication</span>
+              <span>Steam Account</span>
             </label>
             {steamAuth?.logged_in ? (
               <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/40">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Connected via Steam Token</span>
+                <span>Connected</span>
               </span>
             ) : (
               <span className="flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium bg-zinc-900 text-zinc-400 border border-zinc-800">
@@ -323,12 +323,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <div className="text-xs font-bold text-white flex items-center gap-2">
                     <span>{steamAuth.account_name || 'Steam Account'}</span>
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-sky-500/20 text-sky-300 border border-sky-500/30">
-                      TOKEN ACTIVE
+                      SIGNED IN
                     </span>
                   </div>
-                  <div className="text-[11px] text-zinc-400 font-mono mt-0.5">
-                    SteamID: {steamAuth.steam_id || 'Auto-Detected'}
-                  </div>
+                  {steamAuth.steam_id && (
+                    <div className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                      SteamID: {steamAuth.steam_id}
+                    </div>
+                  )}
                 </div>
               </div>
 
