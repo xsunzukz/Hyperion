@@ -74,6 +74,8 @@ export const SteamEngineLoginModal: React.FC<SteamEngineLoginModalProps> = ({
       });
     } catch (err: any) {
       setError(err?.toString() || 'Steam sign-in failed.');
+      // A Guard code is single-use and expires in 30 s: never replay the old one
+      setGuardCode('');
       setIsSubmitting(false);
     }
   };
@@ -186,7 +188,7 @@ export const SteamEngineLoginModal: React.FC<SteamEngineLoginModalProps> = ({
                 type="text"
                 value={guardCode}
                 onChange={(e) => setGuardCode(e.target.value)}
-                placeholder="Leave blank if Steam Guard is off"
+                placeholder="Leave blank to approve on your phone"
                 maxLength={10}
                 spellCheck={false}
                 autoComplete="off"

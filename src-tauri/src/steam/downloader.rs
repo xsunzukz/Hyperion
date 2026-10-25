@@ -302,17 +302,23 @@ impl SteamDownloadManager {
         let started = tokio::time::Instant::now();
         let mut last_error = String::new();
 
-        for attempt in 1..=ATTEMPTS {
+        // A typed Guard code is single-use and rotates every 30 seconds, so a
+        // retry could only ever replay a code that is already dead. Only the
+        // "waiting for the phone approval" path is worth repeating.
+        let typed_code = guard_code.map(|c| !c.trim().is_empty()).unwrap_or(false);
+        let attempts = if typed_code { 1 } else { ATTEMPTS };
+
+        for attempt in 1..=attempts {
             match Self::login_once(username, password, guard_code).await {
                 Ok(()) => return Ok(()),
                 Err(reason) => {
                     // A wrong password, a rate limit or a network problem will not
                     // be fixed by asking Valve again — only the pending approval can.
-                    let retryable = mentions_guard(&reason);
+                    let retryable = !typed_code && mentions_guard(&reason);
                     last_error = reason;
 
                     if !retryable
-                        || attempt == ATTEMPTS
+                        || attempt == attempts
                         || started.elapsed() + std::time::Duration::from_secs(10) >= OVERALL_BUDGET
                     {
                         break;
@@ -320,7 +326,7 @@ impl SteamDownloadManager {
 
                     info!(
                         "Steam sign-in not confirmed (attempt {}/{}): {} — asking again",
-                        attempt, ATTEMPTS, last_error
+                        attempt, attempts, last_error
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 }
@@ -1525,6 +1531,8 @@ fn classify_login_output(output: &str) -> Result<(), String> {
 
     let reason = if lower.contains("invalid password") {
         "Steam rejected that password for this account"
+    } else if lower.contains("two-factor code mismatch") || lower.contains("two factor code mismatch") {
+        "Steam rejected that Guard code — codes change every 30 seconds, copy a fresh one from the Steam app and try again"
     } else if lower.contains("invalid login auth code")
         || lower.contains("two-factor code")
         || lower.contains("steam guard code")
