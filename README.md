@@ -131,7 +131,7 @@ hyperion/
 
 Installed Steam titles are discovered from `libraryfolders.vdf` and `appmanifest_*.acf`, with metadata straight from Valve's public APIs (no key needed).
 
-Steam *downloads* run inside Hyperion — no Steam client window, no Steam library involvement — by driving Valve's headless `SteamCMD`, fetched once into `%LOCALAPPDATA%/Hyperion/steamcmd`, with speed, byte progress, ETA and validation streamed into the Downloads queue.
+Steam *downloads* run inside Hyperion — no Steam client window, no Steam library involvement — by driving Valve's headless `SteamCMD`, fetched once into `%LOCALAPPDATA%/Hyperion/steamcmd`, with speed, byte progress, ETA and validation streamed into the Downloads queue. Valve's archive is only a ~1.6 MB bootstrapper, so it is run once (`+quit`) to fetch the real engine before the first sign-in — otherwise that ~30 MB download happens inside the Steam Guard window and the login times out.
 
 Valve only issues depot licences to an authenticated session, so a sign-in is required before the first download:
 

@@ -235,24 +235,37 @@ static STEAMCMD_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 const STEAMCMD_ZIP_URL: &str = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip";
 
 impl SteamDownloadManager {
-    /// True when the engine is already installed for this user.
-    pub fn steamcmd_installed() -> bool {
-        Self::steamcmd_dir().join("steamcmd.exe").exists()
+    /// True when the *engine* is present, not just the downloaded bootstrapper.
+    ///
+    /// Valve's `steamcmd.zip` contains one file — a ~1.6 MB `steamcmd.exe` — and
+    /// that stub downloads the real engine (`steamclient.dll`, `bin\`, `package\`,
+    /// ~30 MB) the first time it runs. Treating the stub as "installed" made the
+    /// first Steam sign-in pay for that download inside the 180s Steam Guard
+    /// window, so the login timed out.
+    pub fn steamcmd_complete() -> bool {
+        let dir = Self::steamcmd_dir();
+        dir.join("steamcmd.exe").exists()
+            && (dir.join("steamclient.dll").exists() || dir.join("steamclient64.dll").exists())
     }
 
-    /// Ensures that official Valve steamcmd.exe is downloaded and extracted
+    /// True when the engine is already installed for this user.
+    pub fn steamcmd_installed() -> bool {
+        Self::steamcmd_complete()
+    }
+
+    /// Ensures the full SteamCMD engine is downloaded and ready to sign in.
     pub async fn ensure_steamcmd() -> Result<PathBuf, String> {
         let steamcmd_dir = Self::steamcmd_dir();
         let steamcmd_exe = steamcmd_dir.join("steamcmd.exe");
 
-        if steamcmd_exe.exists() {
+        if Self::steamcmd_complete() {
             return Ok(steamcmd_exe);
         }
 
         // One install at a time. Whoever waited re-checks below and, if the other
-        // call already installed it, skips the download entirely.
+        // call already finished it, skips the work entirely.
         let _installing = STEAMCMD_INSTALL.lock().await;
-        if steamcmd_exe.exists() {
+        if Self::steamcmd_complete() {
             return Ok(steamcmd_exe);
         }
 
@@ -272,10 +285,29 @@ impl SteamDownloadManager {
                 tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
             }
 
-            match Self::install_steamcmd(&client, &steamcmd_dir, &steamcmd_exe).await {
+            // The bootstrapper may already be on disk from an earlier launch, so
+            // extraction is conditional; the first-run engine download is not.
+            let result = async {
+                if !steamcmd_exe.exists() {
+                    Self::install_steamcmd(&client, &steamcmd_dir, &steamcmd_exe).await?;
+                }
+
+                Self::bootstrap_engine(&steamcmd_exe).await?;
+
+                if !Self::steamcmd_complete() {
+                    return Err(
+                        "the engine files are still missing after its first run".to_string()
+                    );
+                }
+
+                Ok(())
+            }
+            .await;
+
+            match result {
                 Ok(()) => {
                     info!(
-                        "Valve SteamCMD setup completed successfully: {:?}",
+                        "Valve SteamCMD engine is ready: {:?}",
                         steamcmd_exe
                     );
                     return Ok(steamcmd_exe);
@@ -291,6 +323,48 @@ impl SteamDownloadManager {
             "Could not install SteamCMD after 3 attempts: {}. Check the connection (or an antivirus quarantine) and retry.",
             last_error
         ))
+    }
+
+    /// Runs the freshly extracted bootstrapper once so it fetches the real engine.
+    ///
+    /// `steamcmd +quit` performs the update ("Checking for available updates…")
+    /// and exits. Doing it here means the first sign-in starts against a complete
+    /// engine instead of downloading 30 MB while the Steam Guard prompt waits.
+    async fn bootstrap_engine(steamcmd_exe: &Path) -> Result<(), String> {
+        if Self::steamcmd_complete() {
+            return Ok(());
+        }
+
+        info!("First run: letting SteamCMD fetch its engine (~30 MB)…");
+
+        let mut cmd = tokio::process::Command::new(steamcmd_exe);
+        cmd.arg("+quit")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start the SteamCMD bootstrap: {}", e))?;
+
+        // Generous: a slow link can take minutes for the engine plus its update check.
+        let status = tokio::time::timeout(std::time::Duration::from_secs(900), child.wait())
+            .await
+            .map_err(|_| "SteamCMD bootstrap timed out after 15 minutes".to_string())?
+            .map_err(|e| format!("SteamCMD bootstrap failed: {}", e))?;
+
+        info!(
+            "SteamCMD bootstrap finished (exit {:?})",
+            status.code()
+        );
+
+        Ok(())
     }
 
     /// One download + extract round trip. Leaves nothing half-written on failure.
