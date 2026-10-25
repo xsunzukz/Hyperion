@@ -144,7 +144,6 @@ export interface AppSettings {
   platform: string;
   steam_account?: string;
   steam_id?: string;
-  steam_token?: string;
   /** Opt-in: read this PC's Steam library files to list Steam games */
   steam_library_scan: boolean;
   /** Set by the backend once the first-launch bootstrap has finished */

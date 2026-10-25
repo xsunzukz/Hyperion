@@ -575,7 +575,7 @@ fn parse_appmanifest_file(manifest_path: &Path, library_root: &Path) -> Option<G
 pub fn launch_steam_game(app_id: u32) -> Result<(), String> {
     let url = format!("steam://rungameid/{}", app_id);
     info!("Launching Steam game via protocol: {}", url);
-    open::that(&url).map_err(|e| format!("Failed to launch Steam game (AppID {}): {}", app_id, e))
+    open::that_detached(&url).map_err(|e| format!("Failed to launch Steam game (AppID {}): {}", app_id, e))
 }
 
 

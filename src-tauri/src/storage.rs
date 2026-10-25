@@ -82,6 +82,25 @@ impl Storage {
             "#,
         )?;
 
+        // Older builds kept a captured Steam web-login cookie here; that
+        // sign-in path is gone, so the cookie must not linger on disk.
+        conn.execute("DELETE FROM settings WHERE key = 'steam_token'", [])?;
+
+        // 16 parallel chunk requests was the old default. Epic's CDN leaves
+        // some chunks of old builds hanging, and twice the requests roughly
+        // doubled real throughput (measured on Dauntless), so anyone still on
+        // that default moves to 32 — once; a value the user picked stays.
+        let first_time = conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('workers_default_v2', 'done')",
+            [],
+        )?;
+        if first_time == 1 {
+            conn.execute(
+                "UPDATE settings SET value = '32' WHERE key = 'max_workers' AND value = '16'",
+                [],
+            )?;
+        }
+
         debug!("Database schema initialized successfully");
         Ok(())
     }
@@ -241,6 +260,27 @@ impl Storage {
         Ok(res)
     }
 
+    /// Drops cached Epic titles not in `keep` (Steam rows are left alone).
+    /// Returns how many rows went.
+    pub fn prune_epic_catalog(&self, keep: &[String]) -> Result<usize> {
+        let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+        let conn = self.conn.lock().unwrap();
+        let stale: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT app_name FROM catalog_cache
+                 WHERE namespace NOT IN ('steam', 'steam_ignored') AND app_name NOT LIKE 'steam\\_%' ESCAPE '\\'",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok())
+                .filter(|name| !keep.contains(name.as_str()))
+                .collect()
+        };
+        for app_name in &stale {
+            conn.execute("DELETE FROM catalog_cache WHERE app_name = ?1", params![app_name])?;
+        }
+        Ok(stale.len())
+    }
+
     pub fn get_cached_catalog_item(&self, app_name: &str) -> Result<Option<CachedCatalogItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -288,7 +328,7 @@ impl Storage {
                         settings.default_install_dir = val;
                     }
                 }
-                "max_workers" => settings.max_workers = val.parse().unwrap_or(16),
+                "max_workers" => settings.max_workers = val.parse().unwrap_or(32),
                 "throttle_mbps" => settings.throttle_mbps = val.parse().unwrap_or(0),
                 "language" => settings.language = val,
                 "auto_update" => settings.auto_update = val == "true",
@@ -296,7 +336,6 @@ impl Storage {
                 "platform" => settings.platform = val,
                 "steam_account" => settings.steam_account = if val.is_empty() { None } else { Some(val) },
                 "steam_id" => settings.steam_id = if val.is_empty() { None } else { Some(val) },
-                "steam_token" => settings.steam_token = if val.is_empty() { None } else { Some(val) },
                 "steam_password_enc" => {
                     settings.steam_password_enc = if val.is_empty() { None } else { Some(val) }
                 }
@@ -320,7 +359,6 @@ impl Storage {
             ("platform", settings.platform.clone()),
             ("steam_account", settings.steam_account.clone().unwrap_or_default()),
             ("steam_id", settings.steam_id.clone().unwrap_or_default()),
-            ("steam_token", settings.steam_token.clone().unwrap_or_default()),
             (
                 "steam_password_enc",
                 settings.steam_password_enc.clone().unwrap_or_default(),

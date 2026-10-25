@@ -126,6 +126,61 @@ mod tests {
     }
 
     #[test]
+    fn epic_catalog_prune_keeps_steam_rows_and_current_titles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(temp_dir.path().join("prune.db")).unwrap();
+        for (app, ns) in [
+            ("Jackal", "jackal"),
+            ("Gone", "oldns"),
+            ("steam_331370", "steam"),
+            ("ignored", "steam_ignored"),
+            ("stepping", "ns"),
+        ] {
+            storage.cache_catalog_item(app, app, ns, "id", "{}").unwrap();
+        }
+
+        let removed = storage
+            .prune_epic_catalog(&["Jackal".to_string(), "stepping".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let mut left: Vec<String> = storage
+            .get_cached_catalog_items()
+            .unwrap()
+            .into_iter()
+            .map(|i| i.app_name)
+            .collect();
+        left.sort();
+        assert_eq!(left, ["Jackal", "ignored", "steam_331370", "stepping"]);
+    }
+
+    #[test]
+    fn old_default_worker_count_moves_to_32_once() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("workers.db");
+
+        // A database written before the migration existed, on the old default
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO settings (key, value) VALUES ('max_workers', '16');",
+            )
+            .unwrap();
+        }
+        let storage = Storage::new(&db_path).unwrap();
+        assert_eq!(storage.get_settings().unwrap().max_workers, 32);
+
+        // Afterwards 16 is a deliberate choice and survives restarts
+        let mut settings = storage.get_settings().unwrap();
+        settings.max_workers = 16;
+        storage.save_settings(&settings).unwrap();
+        drop(storage);
+        let storage = Storage::new(&db_path).unwrap();
+        assert_eq!(storage.get_settings().unwrap().max_workers, 16);
+    }
+
+    #[test]
     fn test_storage_operations() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_storage.db");

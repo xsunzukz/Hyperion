@@ -19,7 +19,9 @@ impl Launcher {
     ) -> Result<u32> {
         let install_path = Path::new(&game.install_path);
         let exe_rel = game.executable.trim_start_matches(['/', '\\']);
-        let exe_path = install_path.join(exe_rel);
+        // The executable name comes from the manifest: never run anything
+        // outside the install folder.
+        let exe_path = crate::installer::safe_join(install_path, exe_rel)?;
 
         if !exe_path.exists() {
             return Err(AppError::Launch(format!(
@@ -87,7 +89,15 @@ impl Launcher {
 
         info!("Spawning game process: {}", exe_path.display());
         info!("Working directory: {}", working_dir.display());
-        debug!("Launch arguments: {:?}", args);
+        // The exchange code is a live credential: never write it to a log
+        let shown: Vec<String> = args
+            .iter()
+            .map(|arg| match arg.split_once('=') {
+                Some((key, _)) if key.eq_ignore_ascii_case("-AUTH_PASSWORD") => format!("{}=<redacted>", key),
+                _ => arg.clone(),
+            })
+            .collect();
+        debug!("Launch arguments: {:?}", shown);
 
         let mut cmd = Command::new(&exe_path);
         cmd.args(&args).current_dir(working_dir);

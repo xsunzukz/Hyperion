@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { steamPrepareEngine } from '../lib/ipc';
 import { AlertCircle, Eye, EyeOff, Loader2, Lock, ShieldCheck, X } from 'lucide-react';
 
 interface SteamEngineLoginModalProps {
@@ -42,7 +43,17 @@ export const SteamEngineLoginModal: React.FC<SteamEngineLoginModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [remember, setRemember] = useState(true);
+  // Off by default: SteamCMD caches its own session after one sign-in, so a
+  // stored (DPAPI) password is only needed when that session expires.
+  const [remember, setRemember] = useState(false);
+
+  // First use of Steam: set the engine up while the user types, so the
+  // sign-in does not wait for its one-time download inside the Guard window.
+  useEffect(() => {
+    if (isOpen && mode === 'full') {
+      steamPrepareEngine().catch((e) => console.warn('Steam engine setup will retry on sign-in:', e));
+    }
+  }, [isOpen, mode]);
 
   // The modal is unmounted when it closes, so initial state is already correct.
   // Deliberately no effect here: resetting on a mode switch would wipe whatever

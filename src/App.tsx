@@ -36,7 +36,6 @@ import {
   gameStop,
   gameUninstall,
   listenToDownloadProgress,
-  manifestPrefetch,
   settingsGet,
   settingsSave,
   steamClearCredentials,
@@ -49,6 +48,21 @@ import sponsorBanner from './assets/sponsor.webp';
 
 /** Featured community build published as a bare Epic manifest */
 const SPONSOR_MANIFEST_URL = 'https://api.mysticfox.dev/v2/Dauntless_1.14.7.647472.manifest';
+/** The app name inside that manifest: Epic's codename for Dauntless */
+const SPONSOR_APP_NAME = 'Jackal';
+const SPONSOR_TITLE = 'Dauntless';
+
+/** Without an Epic catalog entry the featured build would show up as a bare
+ *  "Jackal" card with stock art. */
+const withFeaturedArt = (game: GameItem): GameItem =>
+  game.app_name === SPONSOR_APP_NAME
+    ? {
+        ...game,
+        title: game.title === SPONSOR_APP_NAME ? SPONSOR_TITLE : game.title,
+        icon_url: game.icon_url || sponsorBanner,
+        banner_url: game.banner_url || sponsorBanner,
+      }
+    : game;
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -175,18 +189,6 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Every launch: refresh the featured build's manifest and keep the local copy,
-  // so the INSTALL button loads it from disk and a republished build is picked up.
-  useEffect(() => {
-    manifestPrefetch(SPONSOR_MANIFEST_URL)
-      .then((info) => {
-        console.info(
-          `Dauntless manifest refreshed locally${info?.build_version ? ` (build ${info.build_version})` : ''}`
-        );
-      })
-      .catch((e) => console.warn('Dauntless manifest prefetch failed:', e));
-  }, []);
-
   // Surface the opt-in when Steam is connected but its library is not scanned,
   // otherwise the Library looks empty for no visible reason.
   useEffect(() => {
@@ -227,17 +229,28 @@ export const App: React.FC = () => {
     initAuth();
   }, []);
 
-  // Fetch games catalog
+  // Fetch games catalog. Loads overlap (sign-in, finished downloads, the
+  // Refresh button), so an older answer must not replace a newer library —
+  // except a forced refresh, which carries the freshest data whenever it lands.
+  const loadSeq = useRef(0);
+  const appliedSeq = useRef(0);
+  const loadsInFlight = useRef(0);
   const loadGames = async (forceRefresh = false) => {
+    const seq = ++loadSeq.current;
+    loadsInFlight.current += 1;
     setIsRefreshing(true);
     try {
       const list = await catalogGetGames(forceRefresh);
-      setGames(list);
+      if (forceRefresh || seq > appliedSeq.current) {
+        appliedSeq.current = Math.max(appliedSeq.current, seq);
+        setGames(list.map(withFeaturedArt));
+      }
     } catch (e) {
       console.error('Failed to load games:', e);
       showNotification('Failed to retrieve game catalog from backend', 'error');
     } finally {
-      setIsRefreshing(false);
+      loadsInFlight.current -= 1;
+      if (loadsInFlight.current === 0) setIsRefreshing(false);
     }
   };
 
@@ -353,6 +366,11 @@ export const App: React.FC = () => {
   };
 
   const handleInstall = async (game: GameItem) => {
+    // Dauntless installs from the community build, never Epic's delisted one
+    if (game.app_name === SPONSOR_APP_NAME) {
+      handleSponsorInstall();
+      return;
+    }
     try {
       if (game.platform === 'steam') {
         showNotification(`Preparing in-app download for ${game.title}`, 'info');
@@ -391,7 +409,7 @@ export const App: React.FC = () => {
           data.username || '',
           data.password || '',
           data.guardCode,
-          data.remember ?? true
+          data.remember ?? false
         );
       } catch (e: any) {
         // Surface Valve's reason without the Tauri error prefix
@@ -405,14 +423,15 @@ export const App: React.FC = () => {
     setSteamAuthRequest(null);
     setSteamAuthVersion((v) => v + 1);
 
-    // The backend turns on the Steam library scan on sign-in, so refresh the
-    // catalog to pull the Steam titles into the library right away.
+    // Refresh the catalog: titles installed through the engine show up now.
+    // This PC's Steam library is listed only once the user enables that scan
+    // (the Library banner offers it).
     loadGames(false);
 
     // Authorisation-only flow (no pending game): nothing to install
     if (!request.appName) {
       showNotification(
-        'Steam connected — your Steam library is being added',
+        'Steam connected — Steam downloads now run in Hyperion',
         'success'
       );
       return;
@@ -476,9 +495,15 @@ export const App: React.FC = () => {
 
   const handleCancelOrDismissDownload = async (appName: string) => {
     const current = downloads[appName];
+    const finished =
+      current?.status === 'Completed' || current?.status === 'Cancelled' || current?.status === 'Failed';
     try {
-      await gameCancelDownload(appName);
-      showNotification(`Download cancelled / removed for ${current?.title || appName}`, 'info');
+      // A finished entry is only cleared from the queue: there is nothing left
+      // to cancel, and the backend must never be asked to touch that install.
+      if (!finished) {
+        await gameCancelDownload(appName);
+        showNotification(`Download cancelled for ${current?.title || appName}`, 'info');
+      }
     } catch (e) {
       console.error('Cancel download error:', e);
     } finally {
@@ -789,14 +814,22 @@ export const App: React.FC = () => {
               onResume={handleResumeDownload}
               onCancel={handleCancelOrDismissDownload}
               onRetry={(appName) => {
+                if (appName === SPONSOR_APP_NAME) {
+                  handleSponsorInstall();
+                  return;
+                }
                 const game = games.find((g) => g.app_name === appName);
                 if (game) handleInstall(game);
                 else gameInstall(appName);
               }}
               onConfigure={(appName) => {
+                if (appName === SPONSOR_APP_NAME) {
+                  handleSponsorInstall();
+                  return;
+                }
                 const game = games.find((g) => g.app_name === appName);
                 setCustomManifestGame(game || null);
-                setCustomManifestUrl(game ? null : appName === 'Dauntless' ? SPONSOR_MANIFEST_URL : null);
+                setCustomManifestUrl(null);
                 setIsCustomManifestOpen(true);
               }}
             />
@@ -845,6 +878,7 @@ export const App: React.FC = () => {
           }}
           presetGame={customManifestGame}
           presetManifestUrl={customManifestUrl}
+          presetTitle={customManifestUrl === SPONSOR_MANIFEST_URL ? SPONSOR_TITLE : null}
           onRequestSteamLogin={() => requestSteamAuth('full', '', '')}
           steamAuthVersion={steamAuthVersion}
           onInstallStarted={(appName) => {

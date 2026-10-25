@@ -216,14 +216,58 @@ pub fn is_running(pid: u32) -> bool {
     }
 }
 
+/// Lower-cased names of the executables under `dir` (bounded walk).
+fn exe_names_in(dir: &std::path::Path) -> std::collections::HashSet<String> {
+    const MAX_DEPTH: usize = 8;
+    const MAX_ENTRIES: usize = 100_000;
+
+    let mut names = std::collections::HashSet::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((current, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > MAX_ENTRIES {
+                return names;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((entry.path(), depth + 1));
+                }
+            } else {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.ends_with(".exe") {
+                    names.insert(name);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Finds a running process whose executable lives inside `dir`.
+///
+/// Only processes whose image name matches an executable in `dir` are opened.
+/// Opening a handle to every process on the machine each minute is the
+/// enumeration pattern behaviour engines associate with injectors and stealers.
 pub fn find_process_in_dir(dir: &std::path::Path) -> Option<u32> {
     if dir.as_os_str().is_empty() {
         return None;
     }
 
+    let candidates = exe_names_in(dir);
+    if candidates.is_empty() {
+        return None;
+    }
+
     for entry in list_processes() {
-        if entry.pid == std::process::id() {
+        if entry.pid == std::process::id() || !candidates.contains(&entry.name.to_lowercase()) {
             continue;
         }
         if let Some(path) = exe_path(entry.pid) {

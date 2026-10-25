@@ -23,6 +23,7 @@ import { GameItem, ManifestInfo, SteamStoreItem, SteamStoreDetails, SteamAuthSta
 import {
   gameInstallCustomManifest,
   manifestInspect,
+  manifestPrefetch,
   selectDirectory,
   selectManifestFile,
   settingsGet,
@@ -38,6 +39,9 @@ interface CustomManifestModalProps {
   presetGame?: GameItem | null;
   /** Pre-fills the manifest field, e.g. when retrying a featured download */
   presetManifestUrl?: string | null;
+  /** Display name for a pre-filled manifest whose app name is only a codename
+   *  (the featured build's manifest says "Jackal") */
+  presetTitle?: string | null;
   onInstallStarted?: (appName: string) => void;
   /** Opens the in-app Steam sign-in modal (no web/Valve window) */
   onRequestSteamLogin?: () => void;
@@ -63,6 +67,7 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
   onClose,
   presetGame,
   presetManifestUrl,
+  presetTitle,
   onInstallStarted,
   onRequestSteamLogin,
   steamAuthVersion = 0,
@@ -177,7 +182,7 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
         }
       } else {
         setCustomAppName('');
-        setCustomTitle('');
+        setCustomTitle(presetTitle || '');
         setSteamAppId('');
         setSteamTitle('');
         setSteamSearchQuery('');
@@ -233,7 +238,9 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
     }
   };
 
-  const triggerInspect = async (pathOrUrl?: string) => {
+  /** `refresh` re-downloads a URL manifest (falling back to the saved copy when
+   *  offline) instead of serving the cache, so a republished build is used. */
+  const triggerInspect = async (pathOrUrl?: string, refresh = false) => {
     const target = (pathOrUrl ?? manifestPathOrUrl).trim();
     if (!target) {
       setInspectError('Please provide a valid manifest path or URL');
@@ -245,13 +252,16 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
     setSubmitError(null);
 
     try {
-      const info = await manifestInspect(target);
+      const info = refresh ? await manifestPrefetch(target) : await manifestInspect(target);
+      if (!info) throw new Error('Could not read the manifest');
       setManifestInfo(info);
 
       if (info.app_name && !customAppName) {
         setCustomAppName(info.app_name);
       }
-      if (info.matched_game_title && !customTitle) {
+      if (presetTitle && !presetGame) {
+        setCustomTitle(presetTitle);
+      } else if (info.matched_game_title && !customTitle) {
         setCustomTitle(info.matched_game_title);
       } else if (!customTitle && info.app_name) {
         setCustomTitle(info.app_name);
@@ -263,7 +273,9 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
 
       // Give the game its own folder under the library root instead of
       // installing straight into <root> itself.
-      const gameTitle = (customTitle || info.matched_game_title || info.app_name || '').trim();
+      const gameTitle = (
+        (!presetGame && presetTitle) || customTitle || info.matched_game_title || info.app_name || ''
+      ).trim();
       const folder = gameTitle.replace(/[^a-zA-Z0-9 -]/g, '_').replace(/\s+/g, ' ').trim();
       const root = defaultDirRef.current.replace(/[\\/]+$/, '');
       if (folder && root) {
@@ -282,10 +294,11 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
   };
 
   // Opened with a manifest already filled in (e.g. the featured build's INSTALL
-  // button): verify it straight away so the dialog is ready to install.
+  // button): fetch the current copy and verify it straight away, so the dialog
+  // is ready to install. This replaces the old fetch on every app start.
   useEffect(() => {
     if (!isOpen || !presetManifestUrl) return;
-    triggerInspect(presetManifestUrl);
+    triggerInspect(presetManifestUrl, true);
     // Re-running only matters when a different manifest is pre-filled
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, presetManifestUrl]);

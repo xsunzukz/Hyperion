@@ -126,7 +126,7 @@ fn default_platform() -> String {
 }
 
 /// Locally installed game record
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstalledGame {
     pub app_name: String,
     pub title: String,
@@ -240,8 +240,6 @@ pub struct AppSettings {
     pub steam_account: Option<String>,
     #[serde(default)]
     pub steam_id: Option<String>,
-    #[serde(default)]
-    pub steam_token: Option<String>,
     /// DPAPI-encrypted Steam password (base64). Never stored in plaintext.
     #[serde(default)]
     pub steam_password_enc: Option<String>,
@@ -271,7 +269,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_install_dir: detect_default_install_dir(),
-            max_workers: 16,
+            max_workers: 32,
             throttle_mbps: 0,
             language: "en".to_string(),
             auto_update: true,
@@ -279,7 +277,6 @@ impl Default for AppSettings {
             platform: "Windows".to_string(),
             steam_account: None,
             steam_id: None,
-            steam_token: None,
             steam_password_enc: None,
             steam_library_scan: false,
             bootstrap_done: false,

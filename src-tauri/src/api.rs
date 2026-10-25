@@ -21,6 +21,32 @@ pub const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 pub const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 pub const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
 
+/// User agent for requests to anyone other than Epic.
+pub const HONEST_USER_AGENT: &str = concat!("Hyperion/", env!("CARGO_PKG_VERSION"));
+
+/// Epic's download CDNs (manifests and chunks), which see the launcher UA.
+fn is_epic_cdn_host(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            host.ends_with(".akamaized.net")
+                || host.ends_with(".fastly-edge.com")
+                || host.ends_with(".epicgamescdn.com")
+        })
+}
+
+/// True only for Epic's own hosts, the one place the account token may go.
+///
+/// Matched on the parsed host: a substring test on the whole URL handed the
+/// token to any mirror whose path merely contained "epicgames".
+pub fn is_epic_host(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "epicgames.com" || host.ends_with(".epicgames.com"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestApiEntry {
     pub uri: String,
@@ -85,11 +111,28 @@ pub struct ExchangeCodeResponse {
     pub expires_in_seconds: Option<i64>,
 }
 
+type SessionSink = Box<dyn Fn(&Session) + Send + Sync>;
+
+/// Renew the access token when less than this much of it is left.
+const REFRESH_MARGIN_SECS: i64 = 300;
+
+/// True when the session's access token expires within the margin. A session
+/// without a readable expiry is left alone rather than refreshed on every call.
+pub fn needs_refresh(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+    session
+        .expires_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| at.with_timezone(&chrono::Utc) - now < chrono::Duration::seconds(REFRESH_MARGIN_SECS))
+}
+
 pub struct EpicApiClient {
     client: Client,
     session: Arc<RwLock<Option<Session>>>,
     client_id: String,
     client_secret: String,
+    refresh_lock: tokio::sync::Mutex<()>,
+    session_sink: std::sync::RwLock<Option<SessionSink>>,
 }
 
 impl Default for EpicApiClient {
@@ -114,6 +157,8 @@ impl EpicApiClient {
             session: Arc::new(RwLock::new(None)),
             client_id: DEFAULT_CLIENT_ID.to_string(),
             client_secret: DEFAULT_CLIENT_SECRET.to_string(),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            session_sink: std::sync::RwLock::new(None),
         }
     }
 
@@ -240,11 +285,53 @@ impl EpicApiClient {
     }
 
     async fn get_auth_token(&self) -> Result<String> {
-        let s = self.session.read().await;
-        if let Some(ref session) = *s {
-            Ok(session.access_token.clone())
-        } else {
-            Err(AppError::Auth("User is not logged in".to_string()))
+        Ok(self.fresh_session().await?.access_token)
+    }
+
+    /// The signed-in session, renewed first when its access token is about to
+    /// expire.
+    ///
+    /// Hyperion lives in the tray for days, but the token used to be renewed
+    /// only at startup, so every Epic call (library refresh, installs, launch)
+    /// started failing a few hours in. Concurrent callers share one refresh. A
+    /// failed refresh hands back the old session and the call reports Epic's
+    /// own error.
+    pub async fn fresh_session(&self) -> Result<Session> {
+        let not_signed_in = || AppError::Auth("User is not logged in".to_string());
+        let current = self.get_session().await.ok_or_else(not_signed_in)?;
+        if !needs_refresh(&current, chrono::Utc::now()) {
+            return Ok(current);
+        }
+
+        let _guard = self.refresh_lock.lock().await;
+        // Someone else may have renewed it while this call waited
+        let current = self.get_session().await.ok_or_else(not_signed_in)?;
+        if !needs_refresh(&current, chrono::Utc::now()) {
+            return Ok(current);
+        }
+        let Some(refresh_token) = current.refresh_token.clone() else {
+            return Ok(current);
+        };
+
+        match self.refresh_session(&refresh_token).await {
+            Ok(renewed) => {
+                info!("Renewed the Epic session before it expired");
+                if let Some(sink) = self.session_sink.read().ok().as_deref().and_then(Option::as_ref) {
+                    sink(&renewed);
+                }
+                Ok(renewed)
+            }
+            Err(e) => {
+                warn!("Could not renew the Epic session: {}", e);
+                Ok(current)
+            }
+        }
+    }
+
+    /// Called with every renewed session, so the stored copy stays current.
+    pub fn set_session_sink(&self, sink: impl Fn(&Session) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.session_sink.write() {
+            *slot = Some(Box::new(sink));
         }
     }
 
@@ -279,12 +366,8 @@ impl EpicApiClient {
 
     pub async fn get_user_entitlements(&self) -> Result<Vec<serde_json::Value>> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let mut all_entitlements = Vec::new();
@@ -480,7 +563,13 @@ impl EpicApiClient {
 
     pub async fn download_manifest_bytes(&self, uri: &str) -> Result<Vec<u8>> {
         debug!("Downloading manifest binary from: {}", uri);
-        let resp = self.client.get(uri).send().await?;
+        let mut request = self.client.get(uri);
+        // The Epic launcher user agent is for Epic. Community mirrors get an
+        // honest one rather than a client pretending to be Epic's launcher.
+        if !is_epic_host(uri) && !is_epic_cdn_host(uri) {
+            request = request.header(USER_AGENT, HONEST_USER_AGENT);
+        }
+        let resp = request.send().await?;
         if !resp.status().is_success() {
             return Err(AppError::Network(format!(
                 "Failed to download manifest from {}: status {}",
@@ -522,12 +611,8 @@ impl EpicApiClient {
         catalog_item_id: &str,
     ) -> Result<Vec<u8>> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let url = format!(
@@ -557,12 +642,8 @@ impl EpicApiClient {
 
     pub async fn get_cloud_save_manifests(&self, app_name: &str) -> Result<serde_json::Value> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let url = format!(
@@ -586,5 +667,50 @@ impl EpicApiClient {
             .await
             .unwrap_or(serde_json::json!({ "files": [] }));
         Ok(val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_expiring_at(expires_at: Option<&str>) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "access_token": "a",
+            "expires_in": 7200,
+            "expires_at": expires_at,
+            "token_type": "bearer",
+            "refresh_token": "r",
+            "account_id": "acc",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn sessions_renew_shortly_before_they_expire() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert!(!needs_refresh(&session_expiring_at(Some("2026-10-25T14:00:00.000Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T12:04:00.000Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T08:00:00Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T17:31:00+05:30")), now));
+        // Unknown expiry: leave it alone instead of refreshing on every call
+        assert!(!needs_refresh(&session_expiring_at(None), now));
+        assert!(!needs_refresh(&session_expiring_at(Some("garbage")), now));
+    }
+
+    #[test]
+    fn token_goes_to_epic_hosts_only() {
+        assert!(is_epic_host("https://download.epicgames.com/Builds/x.chunk"));
+        assert!(is_epic_host("https://EPICGAMES.com/a"));
+        assert!(is_epic_host("https://launcher-public-service-prod06.ol.epicgames.com/x"));
+
+        assert!(!is_epic_host("https://mirror.example/epicgames/Builds/x.chunk"));
+        assert!(!is_epic_host("https://epicgames.com.evil.example/x"));
+        assert!(!is_epic_host("https://notepicgames.com/x"));
+        assert!(!is_epic_host("https://api.mysticfox.dev/v2/epicgames.com/x"));
+        assert!(!is_epic_host("not a url"));
     }
 }

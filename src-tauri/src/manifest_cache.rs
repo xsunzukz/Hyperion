@@ -51,6 +51,52 @@ pub fn write(url: &str, bytes: &[u8]) -> Result<PathBuf> {
     write_to(&cache_dir(), url, bytes)
 }
 
+/// `%LOCALAPPDATA%/Hyperion/installed` — the exact manifest each install came
+/// from. Verify, repair, updates and uninstall all need the build that is on
+/// disk, not whatever the URL or Epic serves today.
+pub fn installed_dir() -> PathBuf {
+    crate::state::data_dir().join("installed")
+}
+
+/// Filename-safe, collision-proof name for an app's stored manifest.
+pub fn installed_file_name(app_name: &str) -> String {
+    let readable: String = app_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(64)
+        .collect();
+    let mut hasher = Sha1::new();
+    hasher.update(app_name.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("{}-{}.manifest", readable, &digest[..10])
+}
+
+pub fn read_installed_from(dir: &Path, app_name: &str) -> Option<Vec<u8>> {
+    std::fs::read(dir.join(installed_file_name(app_name))).ok()
+}
+
+/// Atomic, like the URL cache: a torn write must never stand in for the build.
+pub fn write_installed_to(dir: &Path, app_name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(installed_file_name(app_name));
+    let tmp = path.with_extension("manifest.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+pub fn read_installed(app_name: &str) -> Option<Vec<u8>> {
+    read_installed_from(&installed_dir(), app_name)
+}
+
+pub fn write_installed(app_name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    write_installed_to(&installed_dir(), app_name, bytes)
+}
+
+pub fn remove_installed(app_name: &str) {
+    let _ = std::fs::remove_file(installed_dir().join(installed_file_name(app_name)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +111,21 @@ mod tests {
         assert_ne!(a, c);
         assert!(a.ends_with(".manifest"));
         assert_eq!(a.len(), ".manifest".len() + 40); // sha1 hex
+    }
+
+    #[test]
+    fn installed_manifests_are_kept_per_app() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_installed_from(dir.path(), "Jackal").is_none());
+
+        write_installed_to(dir.path(), "Jackal", b"build-a").unwrap();
+        write_installed_to(dir.path(), "jackal", b"other-app").unwrap();
+        write_installed_to(dir.path(), "Jackal", b"build-b").unwrap();
+
+        assert_eq!(read_installed_from(dir.path(), "Jackal").unwrap(), b"build-b");
+        assert_eq!(read_installed_from(dir.path(), "jackal").unwrap(), b"other-app");
+        assert_ne!(installed_file_name("a b"), installed_file_name("a_b"));
+        assert!(!installed_file_name("../../x").contains('/'));
     }
 
     #[test]

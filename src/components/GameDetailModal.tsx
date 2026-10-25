@@ -15,7 +15,7 @@ import {
   Square,
 } from 'lucide-react';
 import { DownloadProgress, GameItem, SteamExtraContent, VerificationResult } from '../types';
-import { openPath, gameVerify, cloudSaveSync, steamExtraContent } from '../lib/ipc';
+import { openPath, gameVerify, gameRepair, cloudSaveSync, steamExtraContent } from '../lib/ipc';
 
 interface GameDetailModalProps {
   game: GameItem;
@@ -42,6 +42,10 @@ export const GameDetailModal: React.FC<GameDetailModalProps> = ({
 }) => {
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<VerificationResult | null>(null);
+  // Why Verify/Repair could not run (no saved manifest, Steam title, offline…)
+  const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [isRepairing, setIsRepairing] = useState(false);
+  const [repairStarted, setRepairStarted] = useState(false);
   const [isSyncingSave, setIsSyncingSave] = useState(false);
   const [saveSyncMessage, setSaveSyncMessage] = useState<string | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
@@ -81,13 +85,31 @@ export const GameDetailModal: React.FC<GameDetailModalProps> = ({
   const handleVerify = async () => {
     setIsVerifying(true);
     setVerifyResult(null);
+    setVerifyError(null);
+    setRepairStarted(false);
     try {
       const res = await gameVerify(game.app_name);
       setVerifyResult(res);
-    } catch (e) {
+    } catch (e: any) {
       console.error('Verify error:', e);
+      setVerifyError(String(e?.message ?? e ?? 'Verification failed'));
     } finally {
       setIsVerifying(false);
+    }
+  };
+
+  const handleRepair = async () => {
+    setIsRepairing(true);
+    setVerifyError(null);
+    try {
+      const res = await gameRepair(game.app_name);
+      setVerifyResult(res);
+      setRepairStarted(!res.is_valid);
+    } catch (e: any) {
+      console.error('Repair error:', e);
+      setVerifyError(String(e?.message ?? e ?? 'Repair failed'));
+    } finally {
+      setIsRepairing(false);
     }
   };
 
@@ -432,6 +454,34 @@ export const GameDetailModal: React.FC<GameDetailModalProps> = ({
                     {verifyResult.missing_files.length > 0 && ` Missing: ${verifyResult.missing_files.length}.`}
                     {verifyResult.corrupt_files.length > 0 && ` Corrupt: ${verifyResult.corrupt_files.length}.`}
                   </div>
+                  {!verifyResult.is_valid && (
+                    <div className="mt-3 flex flex-wrap items-center gap-3">
+                      {repairStarted ? (
+                        <span className="text-amber-200">
+                          Repair started — only the{' '}
+                          {verifyResult.missing_files.length + verifyResult.corrupt_files.length} bad files are being
+                          downloaded. Follow it in Downloads.
+                        </span>
+                      ) : (
+                        <button
+                          onClick={handleRepair}
+                          disabled={isRepairing}
+                          className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black font-bold transition disabled:opacity-50 cursor-pointer"
+                        >
+                          {isRepairing
+                            ? 'Starting repair...'
+                            : `Repair ${verifyResult.missing_files.length + verifyResult.corrupt_files.length} files`}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {verifyError && (
+                <div className="p-4 rounded-xl border text-xs bg-rose-500/10 border-rose-500/30 text-rose-300 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>{verifyError}</span>
                 </div>
               )}
 

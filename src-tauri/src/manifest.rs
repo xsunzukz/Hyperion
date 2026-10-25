@@ -10,7 +10,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 pub const MANIFEST_HEADER_MAGIC: u32 = 0x44BEC00C;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
     pub header_size: u32,
     pub size_uncompressed: u32,

@@ -400,32 +400,17 @@ impl SteamDownloadManager {
             ));
         }
 
-        tokio::fs::write(&zip_path, &bytes)
-            .await
-            .map_err(|e| format!("Failed to write steamcmd.zip to disk: {}", e))?;
-
         info!("Extracting steamcmd.zip ({} bytes)...", bytes.len());
 
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-            let zip_arg = zip_path.to_string_lossy().to_string();
-            let dir_arg = steamcmd_dir.to_string_lossy().to_string();
-
-            let status = std::process::Command::new("tar")
-                .args(["-xf", &zip_arg, "-C", &dir_arg])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status()
-                .map_err(|e| format!("Failed to run tar to extract steamcmd.zip: {}", e))?;
-
-            if !status.success() {
-                // A half-extracted tree can leave a truncated steamcmd.exe behind;
-                // drop it so the next attempt does not mistake it for a real install.
-                let _ = tokio::fs::remove_file(steamcmd_exe).await;
-                return Err("tar failed to extract steamcmd.zip".to_string());
-            }
+        let dest = steamcmd_dir.to_path_buf();
+        let extracted = tokio::task::spawn_blocking(move || extract_zip(&bytes, &dest))
+            .await
+            .map_err(|e| format!("steamcmd.zip extraction did not finish: {}", e))?;
+        if let Err(e) = extracted {
+            // A half-extracted tree can leave a truncated steamcmd.exe behind;
+            // drop it so the next attempt does not mistake it for a real install.
+            let _ = tokio::fs::remove_file(steamcmd_exe).await;
+            return Err(e);
         }
 
         let _ = tokio::fs::remove_file(&zip_path).await;
@@ -1689,6 +1674,40 @@ pub fn ensure_steam_appid_file(dir: &Path, app_id: u32) {
     }
 }
 
+/// Unpacks a zip archive into `dest`, in-process.
+///
+/// Entries whose names would land outside `dest` (absolute paths, `..`) are
+/// refused rather than skipped: a tampered archive is not a SteamCMD install.
+fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("steamcmd.zip is not a valid archive: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Could not read steamcmd.zip entry {}: {}", i, e))?;
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("steamcmd.zip has an unsafe entry: {}", entry.name()))?;
+        let out = dest.join(relative);
+
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)
+                .map_err(|e| format!("Could not create {}: {}", out.display(), e))?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Could not create {}: {}", parent.display(), e))?;
+        }
+        let mut file = std::fs::File::create(&out)
+            .map_err(|e| format!("Could not write {}: {}", out.display(), e))?;
+        std::io::copy(&mut entry, &mut file)
+            .map_err(|e| format!("Could not extract {}: {}", out.display(), e))?;
+    }
+    Ok(())
+}
+
 /// True when SteamCMD already holds a cached session for this account.
 ///
 /// When one is present, a bare `+login <user>` authenticates with the stored
@@ -2415,5 +2434,41 @@ Unloading Steam API...OK";
     #[test]
     fn does_not_treat_silence_as_success() {
         assert!(classify_login_output("SteamCMD starting...").is_err());
+    }
+}
+
+#[cfg(test)]
+mod extract_tests {
+    use super::extract_zip;
+    use std::io::Write;
+
+    fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn extracts_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = zip_with(&[("steamcmd.exe", b"MZ stub"), ("bin/readme.txt", b"hi")]);
+        extract_zip(&archive, dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("steamcmd.exe")).unwrap(), b"MZ stub");
+        assert_eq!(std::fs::read(dir.path().join("bin/readme.txt")).unwrap(), b"hi");
+    }
+
+    #[test]
+    fn refuses_entries_outside_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("steamcmd");
+        let archive = zip_with(&[("../escaped.exe", b"x")]);
+        assert!(extract_zip(&archive, &inner).is_err());
+        assert!(!dir.path().join("escaped.exe").exists());
+        assert!(extract_zip(b"not a zip", &inner).is_err());
     }
 }

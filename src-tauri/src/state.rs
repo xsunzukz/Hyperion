@@ -44,6 +44,9 @@ pub struct AppState {
     pub steam_credentials: Mutex<Option<SteamCredentials>>,
     /// Games the launcher started, keyed by app_name (polls for liveness)
     pub running_games: Mutex<HashMap<String, RunningGame>>,
+    /// Held while the Epic catalog is fetched live, so overlapping refreshes
+    /// (sign-in fires two) share one fetch instead of doubling the requests.
+    pub catalog_refresh: Mutex<()>,
 }
 
 impl AppState {
@@ -54,6 +57,14 @@ impl AppState {
         let db_path = app_dir.join("hyperion.db");
         let storage = Arc::new(Storage::new(db_path)?);
         let api_client = Arc::new(EpicApiClient::new());
+        // A session renewed mid-run is saved right away, so the next start
+        // resumes with the new refresh token rather than the spent one.
+        let session_store = storage.clone();
+        api_client.set_session_sink(move |session| {
+            if let Err(e) = session_store.save_session(session) {
+                tracing::warn!("Could not save the renewed Epic session: {}", e);
+            }
+        });
         let downloader = Arc::new(DownloadManager::new());
         let steam_downloader = Arc::new(crate::steam::SteamDownloadManager::new());
 
@@ -67,6 +78,7 @@ impl AppState {
             steam_downloader,
             steam_credentials: Mutex::new(remembered),
             running_games: Mutex::new(HashMap::new()),
+            catalog_refresh: Mutex::new(()),
         })
     }
 }

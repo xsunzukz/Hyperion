@@ -38,11 +38,16 @@ thiserror = "2.0"
 dirs = "6.0"
 uuid = { version = "1.13", features = ["v4"] }
 sysinfo = "0.33"
-open = "5.3"
+# ShellExecuteW for folders and URLs. Without this feature `open` starts a
+# hidden `powershell.exe -NonInteractive -Command …`, a top behaviour signal.
+open = { version = "5.3", features = ["shellexecute-on-windows"] }
 url = "2.5"
 base64 = "0.22"
 hex = "0.4"
 rfd = "0.15"
+# Unpacks Valve's steamcmd.zip in-process; a hidden `tar.exe` child is one more
+# shell-out behaviour engines score against an unsigned app.
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 # Win32 APIs used instead of shelling out to taskkill/reg, which antivirus
