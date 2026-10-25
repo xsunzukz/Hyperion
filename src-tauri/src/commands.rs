@@ -481,11 +481,31 @@ pub async fn steam_get_auth_status(state: State<'_, Arc<AppState>>) -> Result<St
     })
 }
 
-#[tauri::command]
-pub async fn steam_logout(state: State<'_, Arc<AppState>>) -> Result<()> {
+/// Forgets the Steam account completely: in-memory session, DPAPI-protected
+/// password, persisted account/token and SteamCMD's remembered login.
+async fn clear_steam_session(state: &AppState) -> Result<()> {
+    *state.steam_credentials.lock().await = None;
+
+    // Drop the remembered password (a no-op when nothing was stored)
+    crate::secret::forget(&state.storage)?;
+
     let mut settings = state.storage.get_settings()?;
     settings.steam_token = None;
+    settings.steam_account = None;
+    settings.steam_id = None;
     state.storage.save_settings(&settings)?;
+
+    // Make Valve's engine forget the account too, so the next download cannot
+    // silently authenticate with the cached session we just disconnected.
+    crate::steam::downloader::forget_cached_session();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn steam_logout(state: State<'_, Arc<AppState>>) -> Result<()> {
+    clear_steam_session(&state).await?;
+    info!("Disconnected the Steam account");
     Ok(())
 }
 
@@ -611,8 +631,7 @@ pub async fn steam_set_credentials(
 /// Drops the in-memory Steam session and any remembered password.
 #[tauri::command]
 pub async fn steam_clear_credentials(state: State<'_, Arc<AppState>>) -> Result<()> {
-    *state.steam_credentials.lock().await = None;
-    crate::secret::forget(&state.storage)?;
+    clear_steam_session(&state).await?;
     info!("Cleared Steam session and remembered credential");
     Ok(())
 }

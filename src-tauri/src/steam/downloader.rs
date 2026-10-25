@@ -1487,6 +1487,40 @@ pub fn cached_session_exists(username: &str) -> bool {
     loginusers_has_account(&content, username)
 }
 
+/// Makes SteamCMD forget the remembered account, so "Disconnect" really logs
+/// out: the next download has to sign in again instead of reusing the cached
+/// session behind the UI's back.
+pub fn forget_cached_session() {
+    forget_session_in(&SteamDownloadManager::steamcmd_dir().join("config"));
+}
+
+/// Removes the account files from a SteamCMD `config` directory.
+fn forget_session_in(config: &std::path::Path) {
+    if !config.is_dir() {
+        return;
+    }
+
+    for name in ["loginusers.vdf", "config.vdf"] {
+        let path = config.join(name);
+        if path.exists() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => info!("Forgot cached SteamCMD session file {:?}", path),
+                Err(e) => warn!("Could not remove {:?}: {}", path, e),
+            }
+        }
+    }
+
+    // `ssfn*` sentries are this machine's Steam Guard trust tokens
+    if let Ok(entries) = std::fs::read_dir(config) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("ssfn") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 /// Parses `loginusers.vdf` and reports whether the account is remembered.
 fn loginusers_has_account(content: &str, username: &str) -> bool {
     let vdf = crate::steam::vdf::parse_vdf(content);
@@ -1794,8 +1828,9 @@ fn parse_steamcmd_progress_line(line: &str) -> Option<(f64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_login_output, last_logged_progress, login_confirmed, loginusers_has_account,
-        parse_steamcmd_progress_line, pick_launch_exe, requires_steam_guard,
+        classify_login_output, forget_session_in, last_logged_progress, login_confirmed,
+        loginusers_has_account, parse_steamcmd_progress_line, pick_launch_exe,
+        requires_steam_guard,
     };
 
     #[test]
@@ -1973,6 +2008,27 @@ Unloading Steam API...OK";
     fn does_not_confirm_on_the_login_start_line_alone() {
         assert!(!login_confirmed("Logging in using username/password."));
         assert!(!login_confirmed("Steam Guard code provided."));
+    }
+
+    #[test]
+    fn disconnecting_removes_cached_account_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path();
+
+        for name in ["loginusers.vdf", "config.vdf", "ssfn1234567890"] {
+            std::fs::write(config.join(name), "x").unwrap();
+        }
+        std::fs::write(config.join("libraryfolders.vdf"), "x").unwrap();
+
+        forget_session_in(config);
+
+        assert!(!config.join("loginusers.vdf").exists());
+        assert!(!config.join("config.vdf").exists());
+        assert!(!config.join("ssfn1234567890").exists());
+        assert!(
+            config.join("libraryfolders.vdf").exists(),
+            "unrelated SteamCMD files must survive a disconnect"
+        );
     }
 
     #[test]
