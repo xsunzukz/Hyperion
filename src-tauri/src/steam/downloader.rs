@@ -222,7 +222,19 @@ impl SteamDownloadManager {
     fn steamcmd_dir() -> PathBuf {
         crate::state::data_dir().join("steamcmd")
     }
+}
 
+/// Serialises the one-time SteamCMD install.
+///
+/// Two downloads started together used to race on the same `steamcmd.zip` and
+/// extract over each other, which can leave a truncated engine on disk that then
+/// looks installed forever.
+static STEAMCMD_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Valve's official SteamCMD archive (~775 KB; the engine self-updates on first run).
+const STEAMCMD_ZIP_URL: &str = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip";
+
+impl SteamDownloadManager {
     /// Ensures that official Valve steamcmd.exe is downloaded and extracted
     pub async fn ensure_steamcmd() -> Result<PathBuf, String> {
         let steamcmd_dir = Self::steamcmd_dir();
@@ -232,24 +244,67 @@ impl SteamDownloadManager {
             return Ok(steamcmd_exe);
         }
 
-        info!("steamcmd.exe not found. Downloading official Valve SteamCMD...");
+        // One install at a time. Whoever waited re-checks below and, if the other
+        // call already installed it, skips the download entirely.
+        let _installing = STEAMCMD_INSTALL.lock().await;
+        if steamcmd_exe.exists() {
+            return Ok(steamcmd_exe);
+        }
+
         tokio::fs::create_dir_all(&steamcmd_dir)
             .await
             .map_err(|e| format!("Failed to create steamcmd directory: {}", e))?;
 
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|e| format!("Could not create the SteamCMD download client: {}", e))?;
+
+        let mut last_error = String::from("unknown error");
+
+        for attempt in 1..=3 {
+            if attempt > 1 {
+                tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+            }
+
+            match Self::install_steamcmd(&client, &steamcmd_dir, &steamcmd_exe).await {
+                Ok(()) => {
+                    info!(
+                        "Valve SteamCMD setup completed successfully: {:?}",
+                        steamcmd_exe
+                    );
+                    return Ok(steamcmd_exe);
+                }
+                Err(e) => {
+                    warn!("SteamCMD setup attempt {}/3 failed: {}", attempt, e);
+                    last_error = e;
+                }
+            }
+        }
+
+        Err(format!(
+            "Could not install SteamCMD after 3 attempts: {}. Check the connection (or an antivirus quarantine) and retry.",
+            last_error
+        ))
+    }
+
+    /// One download + extract round trip. Leaves nothing half-written on failure.
+    async fn install_steamcmd(
+        client: &reqwest::Client,
+        steamcmd_dir: &Path,
+        steamcmd_exe: &Path,
+    ) -> Result<(), String> {
         let zip_path = steamcmd_dir.join("steamcmd.zip");
-        let client = reqwest::Client::new();
+        let _ = tokio::fs::remove_file(&zip_path).await;
+
         let resp = client
-            .get("https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip")
+            .get(STEAMCMD_ZIP_URL)
             .send()
             .await
             .map_err(|e| format!("Failed to download steamcmd.zip from Valve CDN: {}", e))?;
 
         if !resp.status().is_success() {
-            return Err(format!(
-                "Valve CDN returned error code: {}",
-                resp.status()
-            ));
+            return Err(format!("Valve CDN returned error code: {}", resp.status()));
         }
 
         let bytes = resp
@@ -257,43 +312,50 @@ impl SteamDownloadManager {
             .await
             .map_err(|e| format!("Failed to read steamcmd.zip bytes: {}", e))?;
 
+        // The real archive is ~775 KB. Anything tiny is an error page or a body
+        // that was cut off, and extracting it would produce a broken engine.
+        if bytes.len() < 100_000 {
+            return Err(format!(
+                "steamcmd.zip looks truncated ({} bytes)",
+                bytes.len()
+            ));
+        }
+
         tokio::fs::write(&zip_path, &bytes)
             .await
             .map_err(|e| format!("Failed to write steamcmd.zip to disk: {}", e))?;
 
-        info!("Extracting steamcmd.zip...");
+        info!("Extracting steamcmd.zip ({} bytes)...", bytes.len());
+
         #[cfg(target_os = "windows")]
         {
-            let mut extract_cmd = std::process::Command::new("tar");
-            extract_cmd.args([
-                "-xf",
-                &zip_path.to_string_lossy(),
-                "-C",
-                &steamcmd_dir.to_string_lossy(),
-            ]);
-
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
-            extract_cmd.creation_flags(CREATE_NO_WINDOW);
 
-            let status = extract_cmd
+            let zip_arg = zip_path.to_string_lossy().to_string();
+            let dir_arg = steamcmd_dir.to_string_lossy().to_string();
+
+            let status = std::process::Command::new("tar")
+                .args(["-xf", &zip_arg, "-C", &dir_arg])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .map_err(|e| format!("Failed to run tar to extract steamcmd.zip: {}", e))?;
 
             if !status.success() {
+                // A half-extracted tree can leave a truncated steamcmd.exe behind;
+                // drop it so the next attempt does not mistake it for a real install.
+                let _ = tokio::fs::remove_file(steamcmd_exe).await;
                 return Err("tar failed to extract steamcmd.zip".to_string());
             }
         }
 
-        // Clean up zip archive
         let _ = tokio::fs::remove_file(&zip_path).await;
 
         if !steamcmd_exe.exists() {
             return Err("steamcmd.exe was not produced after extraction".to_string());
         }
 
-        info!("Valve SteamCMD setup completed successfully: {:?}", steamcmd_exe);
-        Ok(steamcmd_exe)
+        Ok(())
     }
 
     /// Checks a Steam account+password by actually signing in with SteamCMD.
