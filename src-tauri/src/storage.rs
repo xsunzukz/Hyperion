@@ -86,6 +86,21 @@ impl Storage {
         // sign-in path is gone, so the cookie must not linger on disk.
         conn.execute("DELETE FROM settings WHERE key = 'steam_token'", [])?;
 
+        // 16 parallel chunk requests was the old default. Epic's CDN leaves
+        // some chunks of old builds hanging, and twice the requests roughly
+        // doubled real throughput (measured on Dauntless), so anyone still on
+        // that default moves to 32 — once; a value the user picked stays.
+        let first_time = conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('workers_default_v2', 'done')",
+            [],
+        )?;
+        if first_time == 1 {
+            conn.execute(
+                "UPDATE settings SET value = '32' WHERE key = 'max_workers' AND value = '16'",
+                [],
+            )?;
+        }
+
         debug!("Database schema initialized successfully");
         Ok(())
     }
@@ -313,7 +328,7 @@ impl Storage {
                         settings.default_install_dir = val;
                     }
                 }
-                "max_workers" => settings.max_workers = val.parse().unwrap_or(16),
+                "max_workers" => settings.max_workers = val.parse().unwrap_or(32),
                 "throttle_mbps" => settings.throttle_mbps = val.parse().unwrap_or(0),
                 "language" => settings.language = val,
                 "auto_update" => settings.auto_update = val == "true",

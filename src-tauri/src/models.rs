@@ -269,7 +269,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_install_dir: detect_default_install_dir(),
-            max_workers: 16,
+            max_workers: 32,
             throttle_mbps: 0,
             language: "en".to_string(),
             auto_update: true,

@@ -155,6 +155,32 @@ mod tests {
     }
 
     #[test]
+    fn old_default_worker_count_moves_to_32_once() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("workers.db");
+
+        // A database written before the migration existed, on the old default
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO settings (key, value) VALUES ('max_workers', '16');",
+            )
+            .unwrap();
+        }
+        let storage = Storage::new(&db_path).unwrap();
+        assert_eq!(storage.get_settings().unwrap().max_workers, 32);
+
+        // Afterwards 16 is a deliberate choice and survives restarts
+        let mut settings = storage.get_settings().unwrap();
+        settings.max_workers = 16;
+        storage.save_settings(&settings).unwrap();
+        drop(storage);
+        let storage = Storage::new(&db_path).unwrap();
+        assert_eq!(storage.get_settings().unwrap().max_workers, 16);
+    }
+
+    #[test]
     fn test_storage_operations() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test_storage.db");

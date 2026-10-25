@@ -14,7 +14,7 @@ Binary manifests, parallel chunk streams and SHA-1 verification — no Python ru
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?style=for-the-badge&logo=tauri&logoColor=white&labelColor=0a0a0b)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=0a0a0b&labelColor=0a0a0b)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=0a0a0b)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-62%20passing-2ea043?style=for-the-badge&labelColor=0a0a0b)](#build--run)
+[![Tests](https://img.shields.io/badge/tests-68%20passing-2ea043?style=for-the-badge&labelColor=0a0a0b)](#build--run)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-8b5cf6?style=for-the-badge&labelColor=0a0a0b)](LICENSE)
 
 [**Features**](#features) · [**Why it's fast**](#why-it-downloads-fast) · [**Steam**](#steam-integration) · [**Build**](#build--run) · [**Security**](#security--antivirus) · [**Credits**](#credits)
@@ -41,7 +41,8 @@ It exists because the interesting part of a launcher is the download pipeline, a
 
 **Download engine**
 
-- Parallel chunk fetching with a bounded semaphore (16 workers by default, up to 32 from the UI, hard cap 64)
+- Parallel chunk fetching with a bounded semaphore (32 workers by default, up to 64 from the UI)
+- Stalled transfers (15 s without data) are dropped and retried, and a chunk running far slower than usual is raced by a second request — the first good copy wins
 - Streaming zlib inflate and AES-256-GCM decryption
 - Decode and disk writes pushed to the blocking pool, so the network never stalls behind the CPU
 - Manual HTTP/TLS via `reqwest` + `rustls`
@@ -82,8 +83,9 @@ Speed here is a sum of small decisions, not one magic knob:
 | Decision | Effect |
 |---|---|
 | Decode (`zlib`/AES) and file writes run on `spawn_blocking` | CPU work no longer starves the async runtime; other requests keep draining |
-| 16 chunk workers by default | High-latency routes need concurrency, not a bigger single stream |
-| 15 s connect / 120 s transfer timeouts | A slow-but-progressing chunk is never aborted and restarted from byte 0 |
+| 32 chunk workers by default | High-latency routes need concurrency, not a bigger single stream |
+| Slow chunks are raced, stalled ones dropped after 15 s | Epic's CDN leaves some chunks of old builds hanging for minutes; one stalled request no longer holds a worker |
+| 10 s connect / 15 s idle / 90 s transfer timeouts | A slow-but-progressing chunk keeps going; a silent one is retried |
 | `tcp_nodelay`, 30 s keepalive, 64-connection idle pool | Removes per-chunk handshake and Nagle stalls |
 | Absolute-offset writes, one handle per worker | No seek contention, no shared cursor between parallel writers |
 | Failed writes abort the download | A dropped slice used to be counted as a finished chunk and produced a corrupt install |
@@ -150,7 +152,7 @@ Unlike the Epic path, this one deliberately delegates to Valve's tool: a from-sc
 
 ```bash
 npm install                 # frontend deps
-cd src-tauri && cargo test  # 62 Rust tests
+cd src-tauri && cargo test  # 68 Rust tests
 cd .. && npm run tauri dev  # full native app
 ```
 

@@ -40,13 +40,16 @@ impl Default for DownloadManager {
 
 impl DownloadManager {
     pub fn new() -> Self {
-        // Tuned for many small parallel chunk fetches. The old 30s ceiling
-        // applied to the whole request, so a chunk that was progressing but slow
-        // got aborted and restarted from zero; a short connect timeout plus a
-        // generous ceiling keeps slow links moving instead of retrying.
+        // Tuned for many small parallel chunk fetches. Epic's CDN stalls on
+        // cold chunks of old builds: a transfer can sit with no bytes arriving
+        // for minutes, and with a 120 s ceiling one stalled chunk held a worker
+        // that long (measured: 0.5 MiB/s on a 200 Mbit line). A transfer that
+        // goes quiet for 15 s is dropped and retried; one that keeps receiving
+        // data — a slow link — is never cut off before the 90 s cap.
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(90))
             .tcp_nodelay(true)
             .tcp_keepalive(Duration::from_secs(30))
             .pool_max_idle_per_host(64)
@@ -258,13 +261,17 @@ impl DownloadManager {
         let created_dir = !target_dir.exists();
         std::fs::create_dir_all(&target_dir)?;
 
-        // 2. Decide which files are already on disk and correct. The journal
-        //    is only a shortcut: a file is skipped when its recorded hash is the
-        //    one this manifest wants, or — for files the journal does not vouch
-        //    for (a crash, an older build, a folder installed by another tool) —
-        //    when its contents actually hash to it. Existence alone proves nothing:
-        //    updates and reinstalls used to keep every old or corrupt file.
+        // 2. Decide which files are already on disk and correct. Existence
+        //    alone proves nothing: updates and reinstalls used to keep every old
+        //    or corrupt file. A file is skipped when the journal records the
+        //    hash this manifest wants. In a folder Hyperion has never written
+        //    (no journal: another tool's install, an older launcher) files are
+        //    hashed instead. Where a journal exists it is complete — files are
+        //    journaled as they finish — so an unlisted file is unfinished and
+        //    re-hashing it (after a crash: GBs of pre-sized, half-empty files on
+        //    a hard disk) would only delay the resume.
         let resume_path = target_dir.join(RESUME_JOURNAL);
+        let trust_journal = resume_path.is_file();
         let journal = read_journal(&resume_path);
         let checks: Vec<(PathBuf, u64, [u8; 20], bool)> = manifest
             .file_manifest_list
@@ -290,7 +297,9 @@ impl DownloadManager {
                     if !meta.is_file() || meta.len() != size {
                         return false;
                     }
-                    vouched || Installer::compute_file_sha1(&path).is_ok_and(|h| h == hash)
+                    vouched
+                        || (!trust_journal
+                            && Installer::compute_file_sha1(&path).is_ok_and(|h| h == hash))
                 })
                 .collect()
         })
@@ -425,12 +434,14 @@ impl DownloadManager {
         // Set when any chunk fails, so already-spawned workers stop instead of
         // writing on in the background after the download has been reported.
         let halt = Arc::new(AtomicBool::new(false));
+        // How long a chunk usually takes right now (moving average), which sets
+        // when a slow one gets a second, racing request.
+        let typical_ms = Arc::new(AtomicU64::new(INITIAL_TYPICAL_CHUNK_MS));
+        let hedged_chunks = Arc::new(AtomicU64::new(0));
         let downloaded_bytes = Arc::new(AtomicU64::new(0));
         let downloaded_chunks = Arc::new(AtomicU64::new(0));
 
         let start_time = Instant::now();
-        let mut last_speed_time = Instant::now();
-        let mut last_speed_bytes = 0u64;
 
         let chunk_refs = Arc::new(chunk_refs);
         let base_url = Arc::new(base_url);
@@ -469,6 +480,8 @@ impl DownloadManager {
             let journal_file = journal_file.clone();
             let journal_lines = journal_lines.clone();
             let parts_left = parts_left.clone();
+            let typical_ms = typical_ms.clone();
+            let hedged_chunks = hedged_chunks.clone();
 
             tokio::spawn(async move {
                 // If paused, wait before acquiring permit
@@ -518,54 +531,36 @@ impl DownloadManager {
                         }
                     }
 
-                    let mut request = client.get(&chunk_url);
-                    if let Some(token) = auth_token.as_deref() {
-                        // Never leak an Epic token to a third-party mirror
-                        if crate::api::is_epic_host(&chunk_url) {
-                            request = request.header("authorization", format!("bearer {}", token));
-                        }
+                    let started = Instant::now();
+                    let hedge_after = hedge_delay(typical_ms.load(Ordering::Relaxed));
+                    let (result, hedged) = fetch_chunk_hedged(
+                        &client,
+                        &chunk_url,
+                        auth_token.as_deref(),
+                        expected_sha,
+                        hedge_after,
+                    )
+                    .await;
+                    if hedged {
+                        hedged_chunks.fetch_add(1, Ordering::Relaxed);
                     }
 
-                    let raw = match request.send().await {
-                        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                            Ok(bytes) if !bytes.is_empty() => bytes,
-                            Ok(_) => {
-                                last_error = "empty response body".to_string();
-                                warn!("Chunk download returned an empty body on attempt {}", attempt + 1);
-                                continue;
-                            }
-                            Err(e) => {
-                                last_error = format!("body read error: {}", e);
-                                warn!("Chunk body read error on attempt {}: {}", attempt + 1, e);
-                                continue;
-                            }
-                        },
-                        Ok(resp) => {
-                            let status = resp.status();
-                            missing_on_cdn = status == reqwest::StatusCode::NOT_FOUND
-                                || status == reqwest::StatusCode::FORBIDDEN;
-                            last_error = format!("HTTP {}", status);
-                            warn!("Chunk download HTTP {} on attempt {}", status, attempt + 1);
-                            continue;
-                        }
-                        Err(e) => {
-                            last_error = format!("network error: {}", e);
-                            warn!("Chunk network error on attempt {}: {}", attempt + 1, e);
-                            continue;
-                        }
-                    };
-
-                    match tokio::task::spawn_blocking(move || decode_verified(&raw, &expected_sha)).await {
-                        Ok(Ok(data)) => {
+                    match result {
+                        Ok(data) => {
+                            record_chunk_time(&typical_ms, started.elapsed());
                             chunk_data = Some(data);
                             break;
                         }
-                        Ok(Err(e)) => {
-                            missing_on_cdn = false;
-                            warn!("Chunk {} rejected on attempt {}: {}", chunk_url, attempt + 1, e);
+                        Err(FetchFailure::Missing(e)) => {
+                            missing_on_cdn = true;
+                            warn!("Chunk download {} on attempt {}", e, attempt + 1);
                             last_error = e;
                         }
-                        Err(e) => last_error = format!("decoder did not finish: {}", e),
+                        Err(FetchFailure::Other(e)) => {
+                            missing_on_cdn = false;
+                            warn!("Chunk {} failed on attempt {}: {}", chunk_url, attempt + 1, e);
+                            last_error = e;
+                        }
                     }
                 }
 
@@ -656,52 +651,66 @@ impl DownloadManager {
 
         drop(tx); // drop original sender so rx closes when all tasks finish
 
-        // Monitor progress and updates
+        // Monitor progress and updates. Progress is published on a steady tick
+        // as well as when chunks finish: during a stall nothing finishes, and
+        // the UI used to freeze on the last (high) speed it was given.
         let mut chunks_completed = 0u64;
-        while let Some(res) = rx.recv().await {
-            if cancel_flag.load(Ordering::SeqCst) {
-                break;
+        let mut meter = SpeedMeter::new(Duration::from_secs(5));
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                res = rx.recv() => {
+                    let Some(res) = res else { break };
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Err(e) = res {
+                        halt.store(true, Ordering::SeqCst);
+                        return Err(e);
+                    }
+                    chunks_completed += 1;
+                    if chunks_completed < total_needed_chunks {
+                        continue;
+                    }
+                }
+                _ = ticker.tick() => {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
             }
-
-            if let Err(e) = res {
-                halt.store(true, Ordering::SeqCst);
-                return Err(e);
-            }
-            chunks_completed += 1;
 
             let now = Instant::now();
-            let elapsed_sec = now.duration_since(last_speed_time).as_secs_f64();
+            let cur_bytes = downloaded_bytes.load(Ordering::Relaxed);
+            let speed = if pause_flag.load(Ordering::SeqCst) {
+                0
+            } else {
+                meter.record(now, cur_bytes)
+            };
+            let remaining_bytes = total_needed_bytes.saturating_sub(cur_bytes);
+            let eta = remaining_bytes.checked_div(speed).unwrap_or(0);
+            let percent = if total_needed_bytes > 0 {
+                (cur_bytes as f32 / total_needed_bytes as f32) * 100.0
+            } else {
+                100.0
+            };
 
-            if elapsed_sec >= 0.4 || chunks_completed == total_needed_chunks {
-                let cur_bytes = downloaded_bytes.load(Ordering::Relaxed);
-                let delta_bytes = cur_bytes.saturating_sub(last_speed_bytes);
-                let speed = if elapsed_sec > 0.0 {
-                    (delta_bytes as f64 / elapsed_sec) as u64
-                } else {
-                    0
-                };
+            let mut p = progress.lock().await;
+            p.downloaded_bytes = cur_bytes;
+            p.downloaded_chunks = chunks_completed;
+            p.speed_bytes_per_sec = speed;
+            p.eta_seconds = eta;
+            p.progress_percent = percent.min(100.0);
+            let _ = app_handle.emit("download-progress", p.clone());
+        }
 
-                let remaining_bytes = total_needed_bytes.saturating_sub(cur_bytes);
-                let eta = remaining_bytes.checked_div(speed).unwrap_or(0);
-
-                let percent = if total_needed_bytes > 0 {
-                    (cur_bytes as f32 / total_needed_bytes as f32) * 100.0
-                } else {
-                    100.0
-                };
-
-                let mut p = progress.lock().await;
-                p.downloaded_bytes = cur_bytes;
-                p.downloaded_chunks = chunks_completed;
-                p.speed_bytes_per_sec = speed;
-                p.eta_seconds = eta;
-                p.progress_percent = percent.min(100.0);
-
-                let _ = app_handle.emit("download-progress", p.clone());
-
-                last_speed_time = now;
-                last_speed_bytes = cur_bytes;
-            }
+        let hedged = hedged_chunks.load(Ordering::Relaxed);
+        if hedged > 0 {
+            info!(
+                "{} of {} chunks were slow enough to race a second request",
+                hedged, total_needed_chunks
+            );
         }
 
         // Check if download was cancelled
@@ -824,6 +833,144 @@ impl DownloadManager {
 /// Tries per chunk (fetch + decode + hash check) before the download fails.
 const CHUNK_ATTEMPTS: u32 = 6;
 
+/// Starting guess for how long one chunk takes, before any have finished.
+const INITIAL_TYPICAL_CHUNK_MS: u64 = 2_000;
+
+/// How one fetch of a chunk failed.
+enum FetchFailure {
+    /// 404/403: this CDN does not have the chunk at all
+    Missing(String),
+    /// Anything worth retrying: network, stall, truncated body, bad data
+    Other(String),
+}
+
+/// Downloads one chunk and decodes + hash-checks it on the blocking pool.
+async fn fetch_chunk(
+    client: &Client,
+    url: &str,
+    auth_token: Option<&str>,
+    expected_sha: [u8; 20],
+) -> std::result::Result<Vec<u8>, FetchFailure> {
+    let mut request = client.get(url);
+    if let Some(token) = auth_token {
+        // Never leak an Epic token to a third-party mirror
+        if crate::api::is_epic_host(url) {
+            request = request.header("authorization", format!("bearer {}", token));
+        }
+    }
+
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| FetchFailure::Other(format!("network error: {}", e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let message = format!("HTTP {}", status);
+        return Err(
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
+                FetchFailure::Missing(message)
+            } else {
+                FetchFailure::Other(message)
+            },
+        );
+    }
+    let raw = resp
+        .bytes()
+        .await
+        .map_err(|e| FetchFailure::Other(format!("body read error: {}", e)))?;
+    if raw.is_empty() {
+        return Err(FetchFailure::Other("empty response body".to_string()));
+    }
+
+    tokio::task::spawn_blocking(move || decode_verified(&raw, &expected_sha))
+        .await
+        .map_err(|e| FetchFailure::Other(format!("decoder did not finish: {}", e)))?
+        .map_err(FetchFailure::Other)
+}
+
+/// Fetches a chunk; if it runs past `hedge_after`, a second request on a fresh
+/// connection races it and whichever succeeds first wins (the loser is
+/// dropped, which aborts it). Returns whether the race was needed.
+///
+/// Epic's CDN serves most chunks of an old build in about a second but leaves
+/// some hanging for 15 s to several minutes; measured on the Dauntless build,
+/// racing those took 16 workers from 0.5–6 MiB/s to 6–9 MiB/s, worst chunk
+/// from 505 s to 14 s.
+async fn fetch_chunk_hedged(
+    client: &Client,
+    url: &str,
+    auth_token: Option<&str>,
+    expected_sha: [u8; 20],
+    hedge_after: Duration,
+) -> (std::result::Result<Vec<u8>, FetchFailure>, bool) {
+    let first = fetch_chunk(client, url, auth_token, expected_sha);
+    tokio::pin!(first);
+    tokio::select! {
+        result = &mut first => return (result, false),
+        _ = tokio::time::sleep(hedge_after) => {}
+    }
+
+    let second = fetch_chunk(client, url, auth_token, expected_sha);
+    tokio::pin!(second);
+    let result = tokio::select! {
+        result = &mut first => match result {
+            Ok(data) => Ok(data),
+            Err(_) => second.await,
+        },
+        result = &mut second => match result {
+            Ok(data) => Ok(data),
+            Err(_) => first.await,
+        },
+    };
+    (result, true)
+}
+
+/// When to race a second request: well past what a chunk normally takes right
+/// now. Relative, so a slow connection (where every chunk is slow) does not
+/// get its traffic doubled; floored and capped so it stays useful either way.
+fn hedge_delay(typical_ms: u64) -> Duration {
+    Duration::from_millis((typical_ms.saturating_mul(3)).clamp(3_000, 60_000))
+}
+
+/// Folds one finished chunk's duration into the moving average.
+fn record_chunk_time(typical_ms: &AtomicU64, took: Duration) {
+    let sample = took.as_millis().min(u64::MAX as u128) as u64;
+    let previous = typical_ms.load(Ordering::Relaxed);
+    typical_ms.store((previous * 9 + sample) / 10, Ordering::Relaxed);
+}
+
+/// Download speed averaged over a sliding window, so the figure (and the ETA
+/// built on it) does not jump with every burst of finished chunks.
+struct SpeedMeter {
+    window: Duration,
+    samples: std::collections::VecDeque<(Instant, u64)>,
+}
+
+impl SpeedMeter {
+    fn new(window: Duration) -> Self {
+        Self {
+            window,
+            samples: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Records the running byte total at `now` and returns bytes per second.
+    fn record(&mut self, now: Instant, total_bytes: u64) -> u64 {
+        self.samples.push_back((now, total_bytes));
+        while self.samples.len() > 2
+            && now.duration_since(self.samples[1].0) >= self.window
+        {
+            self.samples.pop_front();
+        }
+        let (first_at, first_bytes) = self.samples[0];
+        let elapsed = now.duration_since(first_at).as_secs_f64();
+        if elapsed <= 0.0 {
+            return 0;
+        }
+        (total_bytes.saturating_sub(first_bytes) as f64 / elapsed) as u64
+    }
+}
+
 /// Exponential backoff between chunk attempts: 0.5 s, 1 s, 2 s … capped at 8 s.
 fn retry_delay(attempt: u32) -> Duration {
     Duration::from_millis((500u64 << attempt.saturating_sub(1).min(4)).min(8_000))
@@ -928,6 +1075,117 @@ mod tests {
         wrong[0] ^= 0xff;
         assert!(decode_verified(&raw, &wrong).unwrap_err().contains("SHA-1 mismatch"));
         assert!(decode_verified(&raw[..raw.len() - 5], &good).is_err());
+    }
+
+    /// Local chunk server: the connections listed in `stall` hang for 30 s
+    /// before answering, every other one answers at once.
+    async fn chunk_server(raw: Vec<u8>, stall: &'static [u64]) -> (String, Arc<AtomicU64>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/chunk", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicU64::new(0));
+        let counter = served.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                let raw = raw.clone();
+                tokio::spawn(async move {
+                    let mut request = [0u8; 2048];
+                    let _ = socket.read(&mut request).await;
+                    if stall.contains(&n) {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        raw.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&raw).await;
+                });
+            }
+        });
+        (url, served)
+    }
+
+    fn test_chunk() -> (Vec<u8>, Vec<u8>, [u8; 20]) {
+        let payload = b"stalled chunk payload ".repeat(512);
+        let raw = Chunk::create_from_data([9, 8, 7, 6], &payload).unwrap();
+        let sha: [u8; 20] = Sha1::digest(&payload).into();
+        (payload, raw, sha)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_chunk_is_raced_and_the_fast_copy_wins() {
+        let (payload, raw, sha) = test_chunk();
+        let (url, served) = chunk_server(raw, &[0]).await;
+        let client = Client::new();
+
+        let started = Instant::now();
+        let (result, hedged) =
+            fetch_chunk_hedged(&client, &url, None, sha, Duration::from_millis(200)).await;
+
+        assert!(hedged);
+        assert_eq!(result.ok().unwrap(), payload);
+        assert!(started.elapsed() < Duration::from_secs(5), "waited on the stalled request");
+        assert_eq!(served.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_chunk_is_fetched_once() {
+        let (payload, raw, sha) = test_chunk();
+        let (url, served) = chunk_server(raw, &[]).await;
+        let client = Client::new();
+
+        let (result, hedged) =
+            fetch_chunk_hedged(&client, &url, None, sha, Duration::from_secs(5)).await;
+
+        assert!(!hedged);
+        assert_eq!(result.ok().unwrap(), payload);
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_fails_when_neither_copy_is_good() {
+        let (_, raw, mut sha) = test_chunk();
+        let (url, _) = chunk_server(raw, &[0]).await;
+        // The stall timeout cuts the hung first copy short, as in the app
+        let client = Client::builder()
+            .read_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+
+        // Both copies are the same bytes, so a wrong expected hash fails both
+        sha[0] ^= 0xff;
+        let started = Instant::now();
+        let (result, hedged) =
+            fetch_chunk_hedged(&client, &url, None, sha, Duration::from_millis(200)).await;
+        assert!(hedged);
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn hedging_waits_well_past_the_typical_chunk() {
+        assert_eq!(hedge_delay(500), Duration::from_secs(3)); // floor
+        assert_eq!(hedge_delay(2_000), Duration::from_secs(6));
+        assert_eq!(hedge_delay(40_000), Duration::from_secs(60)); // cap
+
+        let typical = AtomicU64::new(2_000);
+        record_chunk_time(&typical, Duration::from_millis(12_000));
+        assert_eq!(typical.load(Ordering::Relaxed), 3_000);
+    }
+
+    #[test]
+    fn speed_is_averaged_over_the_window() {
+        let mut meter = SpeedMeter::new(Duration::from_secs(5));
+        let t0 = Instant::now();
+        assert_eq!(meter.record(t0, 0), 0);
+        // A burst followed by silence: the average decays instead of flipping to 0
+        assert_eq!(meter.record(t0 + Duration::from_secs(1), 10_000_000), 10_000_000);
+        assert_eq!(meter.record(t0 + Duration::from_secs(2), 10_000_000), 5_000_000);
+        // Old samples leave the window
+        let speed = meter.record(t0 + Duration::from_secs(12), 10_000_000);
+        assert_eq!(speed, 0);
     }
 
     #[test]
