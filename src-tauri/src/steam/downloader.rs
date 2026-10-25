@@ -402,7 +402,10 @@ impl SteamDownloadManager {
 
             let lower = line.to_lowercase();
 
-            if lower.contains("logged in ok") {
+            // SteamCMD announces a successful auth as "Logging in user 'x' ... to
+            // Steam Public...OK" — there is no separate "Logged in OK" line.
+            if login_confirmed(&line) {
+                info!("Steam confirmed the sign-in");
                 let _ = child.kill().await;
                 return Ok(());
             }
@@ -632,8 +635,10 @@ impl SteamDownloadManager {
                     continue;
                 }
 
-                // A silent cached login keeps Valve from pinging the phone again
-                if line.contains("Logged in OK") {
+                // A silent cached login keeps Valve from pinging the phone again.
+                // SteamCMD reports it inline ("…to Steam Public...OK") on current
+                // builds and as "Logged in OK" on older ones.
+                if login_confirmed(&line) {
                     *session_invalid.lock().await = false;
                     continue;
                 }
@@ -1518,14 +1523,27 @@ fn guard_timeout_message(output: &str) -> String {
     }
 }
 
+/// True when SteamCMD reported a completed authentication.
+///
+/// Modern builds announce it inline — `Logging in user 'x' [U:1:…] to Steam
+/// Public...OK` — and then `Waiting for client config...OK`, `Waiting for user
+/// info...OK`, `Unloading Steam API...OK`. Older builds print `Logged in OK`.
+fn login_confirmed(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("logged in ok")
+        || lower.contains("to steam public...ok")
+        || lower.contains("waiting for user info")
+        || lower.contains("waiting for client config")
+}
+
 /// Turns SteamCMD's console output into a verdict on the sign-in attempt.
 ///
 /// SteamCMD only ever prints text, so the outcome has to be read from the log:
-/// "Logged in OK" on success, and a handful of well-known failure strings.
+/// a confirmation line on success, and a handful of well-known failure strings.
 fn classify_login_output(output: &str) -> Result<(), String> {
     let lower = output.to_lowercase();
 
-    if lower.contains("logged in ok") {
+    if login_confirmed(output) {
         return Ok(());
     }
 
@@ -1776,7 +1794,7 @@ fn parse_steamcmd_progress_line(line: &str) -> Option<(f64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_login_output, last_logged_progress, loginusers_has_account,
+        classify_login_output, last_logged_progress, login_confirmed, loginusers_has_account,
         parse_steamcmd_progress_line, pick_launch_exe, requires_steam_guard,
     };
 
@@ -1934,6 +1952,27 @@ mod tests {
     fn accepts_a_confirmed_login() {
         let output = "Logging in user 'sunzukz' to Steam Public...\nLogged in OK\nWaiting for user info...OK";
         assert!(classify_login_output(output).is_ok());
+    }
+
+    #[test]
+    fn accepts_the_inline_ok_that_steamcmd_actually_prints() {
+        // Verbatim stdout from SteamCMD 1792617903 after a Guard code was accepted
+        let output = "\
+Loading Steam API...OK
+Logging in using username/password.
+Steam Guard code provided.
+Logging in user 'sunzukz' [U:1:1556759852] to Steam Public...OK
+Waiting for client config...OK
+Waiting for user info...OK
+Unloading Steam API...OK";
+        assert!(login_confirmed(output));
+        assert!(classify_login_output(output).is_ok());
+    }
+
+    #[test]
+    fn does_not_confirm_on_the_login_start_line_alone() {
+        assert!(!login_confirmed("Logging in using username/password."));
+        assert!(!login_confirmed("Steam Guard code provided."));
     }
 
     #[test]
