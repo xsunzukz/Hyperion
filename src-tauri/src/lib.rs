@@ -87,6 +87,7 @@ pub fn run() {
             commands::manifest_inspect,
             commands::manifest_prefetch,
             commands::game_install_custom_manifest,
+            commands::game_repair,
             commands::steam_get_installed_games,
             commands::steam_extra_content,
             commands::steam_launch_game,

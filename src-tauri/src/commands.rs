@@ -1806,7 +1806,7 @@ async fn chunk_base_responds(base: &str, chunk_path: &str, auth_token: Option<&s
 
     // Only Epic's own CDN may see the account token
     if let Some(token) = auth_token {
-        if url.contains("epicgames") {
+        if crate::api::is_epic_host(&url) {
             request = request.header(reqwest::header::AUTHORIZATION, format!("bearer {}", token));
         }
     }
@@ -2073,35 +2073,140 @@ pub async fn game_verify(
         .get_installed_game(&app_name)?
         .ok_or_else(|| AppError::Verification(format!("Game {} is not installed", app_name)))?;
 
-    let settings = state.storage.get_settings()?;
-    let games = catalog_get_games(false, state.clone()).await?;
-    let game = games
-        .into_iter()
-        .find(|g| g.app_name == app_name)
-        .ok_or_else(|| AppError::Verification("Game not found in library".to_string()))?;
+    let (manifest, _) = installed_manifest(&state, &installed).await?;
+    verify_on_disk(installed, manifest).await
+}
 
-    let manifest_resp = state
-        .api_client
-        .get_manifest_response(
-            &game.namespace,
-            &game.catalog_item_id,
-            &game.app_name,
-            &settings.platform,
+/// Verifies an install, then re-downloads only the files that failed.
+///
+/// Corrupt files are deleted first: the resume journal still vouches for them,
+/// and the downloader skips whatever the journal vouches for.
+#[tauri::command]
+pub async fn game_repair(
+    app_handle: AppHandle,
+    app_name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<VerificationResult> {
+    let installed = state
+        .storage
+        .get_installed_game(&app_name)?
+        .ok_or_else(|| AppError::Verification(format!("Game {} is not installed", app_name)))?;
+
+    let (manifest, manifest_bytes) = installed_manifest(&state, &installed).await?;
+    let base_url = installed.base_urls.first().cloned().ok_or_else(|| {
+        AppError::Verification(format!(
+            "No download source is recorded for {}. Install it again into the same folder.",
+            installed.title
+        ))
+    })?;
+
+    let result = verify_on_disk(installed.clone(), manifest.clone()).await?;
+    if result.is_valid {
+        return Ok(result);
+    }
+
+    let install_dir = PathBuf::from(&installed.install_path);
+    for name in &result.corrupt_files {
+        if let Ok(path) = crate::installer::safe_join(&install_dir, name) {
+            if let Err(e) = std::fs::remove_file(&path) {
+                warn!("Could not remove corrupt file {}: {}", path.display(), e);
+            }
+        }
+    }
+    info!(
+        "Repairing {}: {} missing, {} corrupt files",
+        installed.app_name,
+        result.missing_files.len(),
+        result.corrupt_files.len()
+    );
+
+    let settings = state.storage.get_settings()?;
+    state
+        .downloader
+        .clone()
+        .start_download(
+            app_handle,
+            installed.app_name.clone(),
+            installed.title.clone(),
+            manifest,
+            manifest_bytes,
+            base_url,
+            state.api_client.get_session().await.map(|s| s.access_token),
+            install_dir,
+            settings.max_workers,
+            Some(installed),
+            state.storage.clone(),
         )
         .await?;
 
-    let first_elem = manifest_resp
-        .elements
-        .first()
-        .ok_or_else(|| AppError::Manifest("No manifest element returned by API".to_string()))?;
+    Ok(result)
+}
 
-    let (manifest_bytes, _base_urls) = state
+/// Hashes the install on the blocking pool: a multi-GB verify inside the async
+/// command used to stall the runtime (and every other request) until it ended.
+async fn verify_on_disk(installed: InstalledGame, manifest: Manifest) -> Result<VerificationResult> {
+    tokio::task::spawn_blocking(move || Installer::verify_installed_game(&installed, &manifest))
+        .await
+        .map_err(|e| AppError::Verification(format!("Verification did not finish: {}", e)))?
+}
+
+/// The manifest an install was made from (and its raw bytes).
+///
+/// Installs keep their exact manifest since this was added. An older Epic
+/// install falls back to Epic's live manifest, but only while Epic still serves
+/// the same build — checking files against a newer build reports an intact
+/// game as corrupt.
+async fn installed_manifest(state: &AppState, installed: &InstalledGame) -> Result<(Manifest, Vec<u8>)> {
+    if let Some(bytes) = crate::manifest_cache::read_installed(&installed.app_name) {
+        match Manifest::parse(&bytes) {
+            Ok(manifest) => return Ok((manifest, bytes)),
+            Err(e) => warn!("Saved manifest for {} is unreadable: {}", installed.app_name, e),
+        }
+    }
+
+    if installed.platform == "steam" || installed.app_name.starts_with("steam_") {
+        return Err(AppError::Verification(
+            "Steam titles are validated by SteamCMD: choose Install again and it checks every file."
+                .to_string(),
+        ));
+    }
+
+    let no_manifest = || {
+        AppError::Verification(format!(
+            "There is no saved manifest for this copy of {}. Install it again into the same folder: only missing or changed files are downloaded, and Verify works from then on.",
+            installed.title
+        ))
+    };
+
+    let item = state
+        .storage
+        .get_cached_catalog_item(&installed.app_name)?
+        .ok_or_else(no_manifest)?;
+    let settings = state.storage.get_settings()?;
+    let manifest_resp = state
+        .api_client
+        .get_manifest_response(
+            &item.namespace,
+            &item.catalog_item_id,
+            &installed.app_name,
+            &settings.platform,
+        )
+        .await
+        .map_err(|_| no_manifest())?;
+    let first_elem = manifest_resp.elements.first().ok_or_else(no_manifest)?;
+    let (bytes, _) = state
         .api_client
         .download_manifest_from_element(first_elem)
         .await?;
-    let manifest = Manifest::parse(&manifest_bytes)?;
+    let manifest = Manifest::parse(&bytes)?;
 
-    Installer::verify_installed_game(&installed, &manifest)
+    if !installed.version.is_empty() && manifest.meta.build_version != installed.version {
+        return Err(AppError::Verification(format!(
+            "{} is build {}, but Epic now serves {}. Install the update to bring it up to date.",
+            installed.title, installed.version, manifest.meta.build_version
+        )));
+    }
+    Ok((manifest, bytes))
 }
 
 #[tauri::command]

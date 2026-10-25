@@ -21,6 +21,17 @@ pub const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 pub const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 pub const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
 
+/// True only for Epic's own hosts, the one place the account token may go.
+///
+/// Matched on the parsed host: a substring test on the whole URL handed the
+/// token to any mirror whose path merely contained "epicgames".
+pub fn is_epic_host(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "epicgames.com" || host.ends_with(".epicgames.com"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestApiEntry {
     pub uri: String,
@@ -586,5 +597,23 @@ impl EpicApiClient {
             .await
             .unwrap_or(serde_json::json!({ "files": [] }));
         Ok(val)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_goes_to_epic_hosts_only() {
+        assert!(is_epic_host("https://download.epicgames.com/Builds/x.chunk"));
+        assert!(is_epic_host("https://EPICGAMES.com/a"));
+        assert!(is_epic_host("https://launcher-public-service-prod06.ol.epicgames.com/x"));
+
+        assert!(!is_epic_host("https://mirror.example/epicgames/Builds/x.chunk"));
+        assert!(!is_epic_host("https://epicgames.com.evil.example/x"));
+        assert!(!is_epic_host("https://notepicgames.com/x"));
+        assert!(!is_epic_host("https://api.mysticfox.dev/v2/epicgames.com/x"));
+        assert!(!is_epic_host("not a url"));
     }
 }

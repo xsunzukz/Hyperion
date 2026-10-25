@@ -5,6 +5,7 @@ use crate::manifest::{ChunkInfo, FileManifest, Manifest};
 use crate::models::{DownloadProgress, DownloadStatus, InstalledGame};
 use crate::storage::Storage;
 use reqwest::Client;
+use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -498,90 +499,117 @@ impl DownloadManager {
                 let chunk_rel_path = chunk_info.path(manifest_version);
                 let chunk_url = format!("{}/{}", base_url.trim_end_matches('/'), chunk_rel_path);
 
-                // Fetch the raw chunk with retry. Parsing (zlib inflate + AES) and
-                // the file writes happen afterwards on the blocking pool: doing
-                // that inline starved the async runtime, which stalled every other
-                // request sharing the executor and capped real throughput.
-                let mut raw_chunk = None;
-                for retry in 0..3 {
+                // Fetch, decode and hash-check the chunk, retrying the whole
+                // sequence: a truncated body, a bad inflate or a SHA-1 mismatch
+                // is refetched just like a network error. Decoding runs on the
+                // blocking pool so the async runtime keeps draining requests.
+                let expected_sha = chunk_info.sha_hash;
+                let mut chunk_data: Option<Vec<u8>> = None;
+                let mut last_error = String::new();
+                let mut missing_on_cdn = false;
+                for attempt in 0..CHUNK_ATTEMPTS {
                     if cancel() {
                         return;
+                    }
+                    if attempt > 0 {
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                        if cancel() {
+                            return;
+                        }
                     }
 
                     let mut request = client.get(&chunk_url);
                     if let Some(token) = auth_token.as_deref() {
                         // Never leak an Epic token to a third-party mirror
-                        if chunk_url.contains("epicgames") {
+                        if crate::api::is_epic_host(&chunk_url) {
                             request = request.header("authorization", format!("bearer {}", token));
                         }
                     }
 
-                    match request.send().await {
+                    let raw = match request.send().await {
                         Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                            Ok(bytes) if !bytes.is_empty() => {
-                                raw_chunk = Some(bytes);
-                                break;
+                            Ok(bytes) if !bytes.is_empty() => bytes,
+                            Ok(_) => {
+                                last_error = "empty response body".to_string();
+                                warn!("Chunk download returned an empty body on attempt {}", attempt + 1);
+                                continue;
                             }
-                            Ok(_) => warn!(
-                                "Chunk download returned an empty body on attempt {}",
-                                retry + 1
-                            ),
                             Err(e) => {
-                                warn!("Chunk body read error on attempt {}: {}", retry + 1, e)
+                                last_error = format!("body read error: {}", e);
+                                warn!("Chunk body read error on attempt {}: {}", attempt + 1, e);
+                                continue;
                             }
                         },
                         Ok(resp) => {
-                            warn!(
-                                "Chunk download HTTP {} on attempt {}",
-                                resp.status(),
-                                retry + 1
-                            );
+                            let status = resp.status();
+                            missing_on_cdn = status == reqwest::StatusCode::NOT_FOUND
+                                || status == reqwest::StatusCode::FORBIDDEN;
+                            last_error = format!("HTTP {}", status);
+                            warn!("Chunk download HTTP {} on attempt {}", status, attempt + 1);
+                            continue;
                         }
                         Err(e) => {
-                            warn!("Chunk network error on attempt {}: {}", retry + 1, e);
+                            last_error = format!("network error: {}", e);
+                            warn!("Chunk network error on attempt {}: {}", attempt + 1, e);
+                            continue;
                         }
+                    };
+
+                    match tokio::task::spawn_blocking(move || decode_verified(&raw, &expected_sha)).await {
+                        Ok(Ok(data)) => {
+                            chunk_data = Some(data);
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            missing_on_cdn = false;
+                            warn!("Chunk {} rejected on attempt {}: {}", chunk_url, attempt + 1, e);
+                            last_error = e;
+                        }
+                        Err(e) => last_error = format!("decoder did not finish: {}", e),
                     }
-                    tokio::time::sleep(Duration::from_millis(200 * (retry + 1))).await;
                 }
 
                 if cancel() {
                     return;
                 }
 
-                let Some(raw_chunk) = raw_chunk else {
-                    // A 404/403 here almost always means the base URL points at a
-                    // host that only mirrors the manifest, not the chunk files.
-                    let _ = tx
-                        .send(Err(AppError::Download(format!(
+                let guid = chunk_info.guid;
+                let Some(chunk_data) = chunk_data else {
+                    let message = if missing_on_cdn {
+                        // A 404/403 here almost always means the base URL points at a
+                        // host that only mirrors the manifest, not the chunk files.
+                        format!(
                             "Chunk CDN '{}' does not serve this build (missing: {}). Sign in to Epic so the game data can be pulled from Epic's CDN, or set the chunk base URL in Options & Manifest.",
                             base_url, chunk_url
-                        ))))
-                        .await;
+                        )
+                    } else {
+                        format!(
+                            "Chunk {:08x}-{:08x}-{:08x}-{:08x} failed after {} attempts: {}",
+                            guid[0], guid[1], guid[2], guid[3], CHUNK_ATTEMPTS, last_error
+                        )
+                    };
+                    let _ = tx.send(Err(AppError::Download(message))).await;
                     return;
                 };
 
-                // Decode and commit this chunk off the async runtime, so the
-                // network keeps draining while chunks are inflated and written.
+                // Commit this chunk off the async runtime as well
                 let refs: Vec<ChunkRef> = chunk_refs
                     .get(&chunk_info.guid)
                     .map(|refs| refs.to_vec())
                     .unwrap_or_default();
-                let guid = chunk_info.guid;
 
                 let stored = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
-                    let chunk = Chunk::parse(&raw_chunk, None).map_err(|e| e.to_string())?;
-
                     for r in refs {
                         let slice_start = r.chunk_offset as usize;
                         let slice_end = slice_start + r.size as usize;
-                        if slice_end > chunk.data.len() {
+                        if slice_end > chunk_data.len() {
                             return Err(format!(
                                 "payload is {} bytes but a file slice needs {}",
-                                chunk.data.len(),
+                                chunk_data.len(),
                                 slice_end
                             ));
                         }
-                        write_at(&r.file_path, &chunk.data[slice_start..slice_end], r.file_offset)
+                        write_at(&r.file_path, &chunk_data[slice_start..slice_end], r.file_offset)
                             .map_err(|e| format!("could not write {:?}: {}", r.file_path, e))?;
 
                         // Last part of this file written: journal it now, so a
@@ -793,6 +821,36 @@ impl DownloadManager {
     }
 }
 
+/// Tries per chunk (fetch + decode + hash check) before the download fails.
+const CHUNK_ATTEMPTS: u32 = 6;
+
+/// Exponential backoff between chunk attempts: 0.5 s, 1 s, 2 s … capped at 8 s.
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis((500u64 << attempt.saturating_sub(1).min(4)).min(8_000))
+}
+
+/// Inflates/decrypts a downloaded chunk and checks it against the manifest.
+///
+/// The manifest's chunk SHA-1 is the hash of the uncompressed window, so a
+/// mislabelled, truncated or bit-flipped chunk is caught here before a single
+/// byte reaches the game files. zlib's own checksum only covers compressed
+/// chunks; stored (uncompressed) ones had no check at all. An all-zero hash
+/// means the manifest predates chunk hashes and cannot be checked.
+fn decode_verified(raw: &[u8], expected_sha: &[u8; 20]) -> std::result::Result<Vec<u8>, String> {
+    let chunk = Chunk::parse(raw, None).map_err(|e| e.to_string())?;
+    if *expected_sha != [0u8; 20] {
+        let actual: [u8; 20] = Sha1::digest(&chunk.data).into();
+        if actual != *expected_sha {
+            return Err(format!(
+                "SHA-1 mismatch: got {}, manifest expects {}",
+                hex::encode(actual),
+                hex::encode(expected_sha)
+            ));
+        }
+    }
+    Ok(chunk.data)
+}
+
 /// `filename -> sha1 hex` from a resume journal (lower-cased names; the last
 /// line for a file wins, since completed files are appended as they finish).
 fn read_journal(path: &std::path::Path) -> HashMap<String, String> {
@@ -854,6 +912,30 @@ mod tests {
             filename: name.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chunks_must_match_the_manifest_sha1() {
+        let payload = b"chunk payload bytes".repeat(64);
+        let raw = Chunk::create_from_data([1, 2, 3, 4], &payload).unwrap();
+        let good: [u8; 20] = Sha1::digest(&payload).into();
+
+        assert_eq!(decode_verified(&raw, &good).unwrap(), payload);
+        // Manifests without chunk hashes cannot be checked, but still decode
+        assert_eq!(decode_verified(&raw, &[0u8; 20]).unwrap(), payload);
+
+        let mut wrong = good;
+        wrong[0] ^= 0xff;
+        assert!(decode_verified(&raw, &wrong).unwrap_err().contains("SHA-1 mismatch"));
+        assert!(decode_verified(&raw[..raw.len() - 5], &good).is_err());
+    }
+
+    #[test]
+    fn retries_back_off_exponentially_with_a_cap() {
+        assert_eq!(retry_delay(1), Duration::from_millis(500));
+        assert_eq!(retry_delay(2), Duration::from_millis(1_000));
+        assert_eq!(retry_delay(3), Duration::from_millis(2_000));
+        assert_eq!(retry_delay(10), Duration::from_millis(8_000));
     }
 
     #[test]

@@ -396,6 +396,22 @@ export const gameVerify = async (appName: string): Promise<VerificationResult> =
   };
 };
 
+/** Verifies the install and re-downloads only the files that failed. Returns
+ *  the pre-repair verification; when it is not valid a download has started. */
+export const gameRepair = async (appName: string): Promise<VerificationResult> => {
+  if (isTauri()) {
+    return invoke<VerificationResult>('game_repair', { appName });
+  }
+  return {
+    app_name: appName,
+    total_files: 1420,
+    valid_files: 1418,
+    corrupt_files: ['Content/Paks/pakchunk1.pak'],
+    missing_files: ['Engine/Binaries/Win64/readme.txt'],
+    is_valid: false,
+  };
+};
+
 export const gameUninstall = async (appName: string): Promise<void> => {
   if (isTauri()) {
     return invoke<void>('game_uninstall', { appName });
