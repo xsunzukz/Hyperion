@@ -327,6 +327,7 @@ It is a **client**, not a store and not a DRM bypass: it signs in to *your* acco
 | | |
 |---|---|
 | **Author** | [xsunzukz](https://github.com/xsunzukz) |
+| **Contributors** | [pranav158](https://github.com/pranav158) |
 | **Assistance** | DeepSeek Harness and Claude Code (AI coding agents) — breakdown in [CONTRIBUTORS.md](CONTRIBUTORS.md) |
 | **Protocol research** | [Legendary](https://github.com/legendary-gl/legendary) by derrod |
 | **Licence** | [GPL-3.0-or-later](LICENSE) |
