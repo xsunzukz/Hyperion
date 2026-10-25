@@ -24,7 +24,9 @@ const STAGE_WEIGHT: Record<string, [number, number]> = {
 };
 
 export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
-  const [steps, setSteps] = useState<BootStep[]>([]);
+  // Only the stage that is running right now is shown — the list of everything
+  // already done just made the splash look busy.
+  const [step, setStep] = useState<BootStep | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Held in a ref so the startup effect never restarts when the parent re-renders.
@@ -38,24 +40,12 @@ export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
     const run = async () => {
       unlisten = await listenToBootstrapProgress((event: { payload: BootstrapProgress }) => {
         const payload = event.payload;
-
-        setSteps((prev) => {
-          const entry: BootStep = {
-            stage: payload.stage,
-            label: payload.label,
-            detail: payload.detail,
-            percent: payload.percent,
-            finished: payload.finished,
-          };
-
-          const index = prev.findIndex((step) => step.stage === payload.stage);
-          if (index === -1) {
-            return [...prev, entry];
-          }
-
-          const next = [...prev];
-          next[index] = entry;
-          return next;
+        setStep({
+          stage: payload.stage,
+          label: payload.label,
+          detail: payload.detail,
+          percent: payload.percent,
+          finished: payload.finished,
         });
       });
 
@@ -66,7 +56,7 @@ export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
 
       try {
         await appBootstrap(false);
-        // Let the "done" row render before the launcher takes over.
+        // Let the final row render before the launcher takes over.
         if (!cancelled) {
           setTimeout(() => doneRef.current(), 550);
         }
@@ -85,12 +75,15 @@ export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
     };
   }, []);
 
-  const overall = steps.reduce((highest, step) => {
-    const [start, end] = STAGE_WEIGHT[step.stage] ?? [100, 100];
-    const within = typeof step.percent === 'number' ? step.percent : step.finished ? 100 : 35;
-    const value = start + ((end - start) * within) / 100;
-    return Math.max(highest, Math.min(100, value));
-  }, error ? 100 : 4);
+  const weights = step ? STAGE_WEIGHT[step.stage] ?? [100, 100] : [0, 4];
+  const within = step
+    ? typeof step.percent === 'number'
+      ? step.percent
+      : step.finished
+        ? 100
+        : 35
+    : 100;
+  const overall = error ? 100 : Math.min(100, weights[0] + ((weights[1] - weights[0]) * within) / 100);
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-[#050507] text-white select-none">
@@ -106,18 +99,11 @@ export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
           </div>
         </div>
 
-        <div className="mt-8 space-y-3">
-          {steps.length === 0 && (
-            <div className="flex items-center gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-3">
-              <Loader2 className="h-4 w-4 animate-spin text-orange-400" />
-              <span className="text-[13px] font-semibold text-white">Waking up the backend…</span>
-            </div>
-          )}
-
-          {steps.map((step) => (
+        <div className="mt-8">
+          {step ? (
             <div
               key={step.stage}
-              className="flex items-start gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-3"
+              className="flex animate-fade-in items-start gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-3"
             >
               <span className="mt-0.5">
                 {step.finished ? (
@@ -138,7 +124,12 @@ export const BootScreen: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                 <span className="font-mono text-[11px] text-zinc-500">{Math.round(step.percent)}%</span>
               )}
             </div>
-          ))}
+          ) : (
+            <div className="flex items-center gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-4 py-3">
+              <Loader2 className="h-4 w-4 animate-spin text-orange-400" />
+              <span className="text-[13px] font-semibold text-white">Waking up the backend…</span>
+            </div>
+          )}
         </div>
 
         {error ? (
