@@ -597,9 +597,15 @@ pub async fn steam_set_credentials(
     }
 
     // Remember which account signed in, so later runs can show it without ever
-    // opening Steam's own account files.
+    // opening Steam's own account files. Signing in also turns on the local
+    // library scan: the whole point of connecting is seeing the Steam games, and
+    // it stays switchable from Settings.
     if let Ok(mut settings) = state.storage.get_settings() {
         settings.steam_account = Some(username.clone());
+        if !settings.steam_library_scan {
+            settings.steam_library_scan = true;
+            info!("Enabled the Steam library scan after a successful sign-in");
+        }
         if let Err(e) = state.storage.save_settings(&settings) {
             warn!("Could not persist the Steam account name: {}", e);
         }
@@ -782,6 +788,40 @@ pub async fn auth_get_profile(state: State<'_, Arc<AppState>>) -> Result<Option<
 // Catalog and Library Commands
 // ==========================================
 
+/// `GameItem` rows for locally installed titles, built without any network call.
+///
+/// Steam entries are skipped here: the Steam resolver emits them with the right
+/// platform, artwork and AppID, so including them twice would surface a
+/// `steam_*` title as an Epic card.
+fn installed_game_items(installed: &std::collections::HashMap<String, InstalledGame>) -> Vec<GameItem> {
+    installed
+        .values()
+        .filter(|ig| ig.platform != "steam" && !ig.app_name.starts_with("steam_"))
+        .map(|ig| GameItem {
+            app_name: ig.app_name.clone(),
+            title: ig.title.clone(),
+            namespace: "local".to_string(),
+            catalog_item_id: String::new(),
+            description: Some("Installed local game".to_string()),
+            developer: None,
+            publisher: None,
+            icon_url: None,
+            banner_url: None,
+            logo_url: None,
+            is_installed: true,
+            is_dlc: ig.is_dlc,
+            build_version: Some(ig.version.clone()),
+            install_path: Some(ig.install_path.clone()),
+            install_size: Some(ig.install_size),
+            executable: Some(ig.executable.clone()),
+            can_run_offline: ig.can_run_offline,
+            supports_cloud_saves: false,
+            platform: "epic".to_string(),
+            steam_app_id: None,
+        })
+        .collect()
+}
+
 /// Drops duplicate entries for the same app, keeping the first occurrence.
 fn dedupe_games(games: Vec<GameItem>) -> Vec<GameItem> {
     let mut seen = std::collections::HashSet::new();
@@ -805,43 +845,15 @@ pub async fn catalog_get_games(
 
     let session = state.api_client.get_session().await;
 
-    if session.is_none() {
-        // Offline mode: return installed games from local database
-        let mut items: Vec<GameItem> = installed_map
-            .into_values()
-            .map(|ig| GameItem {
-                app_name: ig.app_name,
-                title: ig.title,
-                namespace: "local".to_string(),
-                catalog_item_id: "".to_string(),
-                description: Some("Installed local game".to_string()),
-                developer: None,
-                publisher: None,
-                icon_url: None,
-                banner_url: None,
-                logo_url: None,
-                is_installed: true,
-                is_dlc: ig.is_dlc,
-                build_version: Some(ig.version),
-                install_path: Some(ig.install_path),
-                install_size: Some(ig.install_size),
-                executable: Some(ig.executable),
-                can_run_offline: ig.can_run_offline,
-                supports_cloud_saves: false,
-                platform: "epic".to_string(),
-                steam_app_id: None,
-            })
-            .collect();
-
-        // Include all installed & owned Steam library games with verified official titles
-        items.extend(local_steam_library(&state, &settings, force_refresh).await);
-
-        return Ok(dedupe_games(items));
-    }
-
-    // If not force refresh, try loading from cache first
+    // Read the cache before anything network-bound: it is the only source that
+    // still works when the session is gone, expired, or the machine is offline.
+    // Returning only installed games whenever there was no session is exactly
+    // what made a populated library look empty.
     let cached = state.storage.get_cached_catalog_items()?;
-    if !force_refresh && !cached.is_empty() {
+    // Serve the cache unless a live refresh was asked for *and* we could actually
+    // perform one; logged out there is nothing to refresh from, so the cache is
+    // the library.
+    if !cached.is_empty() && (!force_refresh || session.is_none()) {
         let mut items = Vec::new();
         for item in cached {
             let app_name = item.app_name;
@@ -952,16 +964,25 @@ pub async fn catalog_get_games(
         return Ok(dedupe_games(items));
     }
 
+    // Nothing cached and nobody signed in: show what is installed on this PC.
+    if session.is_none() {
+        let mut items = installed_game_items(&installed_map);
+        items.extend(local_steam_library(&state, &settings, force_refresh).await);
+        return Ok(dedupe_games(items));
+    }
+
     // Fetch real assets from Epic Games API
     info!("Fetching live catalog assets from Epic Games Store API...");
     let assets = match state.api_client.get_game_assets(&settings.platform).await {
         Ok(a) => a,
         Err(e) => {
             warn!(
-                "Failed to fetch live assets: {}. Falling back to cached library.",
+                "Failed to fetch live assets: {}. Falling back to the installed library.",
                 e
             );
-            let mut fallback_items = Vec::new();
+            // Previously this returned the Steam library alone, so an expired
+            // token blanked every installed Epic title too.
+            let mut fallback_items = installed_game_items(&installed_map);
             fallback_items.extend(local_steam_library(&state, &settings, false).await);
             return Ok(dedupe_games(fallback_items));
         }
@@ -1492,10 +1513,55 @@ async fn manifest_bytes_for(state: &AppState, url: &str) -> Result<(Vec<u8>, boo
     Ok((bytes, false))
 }
 
-async fn inspect_manifest(state: &AppState, trimmed: &str) -> Result<ManifestInfo> {
+/// Fresh manifest bytes for `url`, falling back to a readable cached copy.
+///
+/// Startup uses this instead of `manifest_bytes_for` so a manifest the sponsor
+/// republishes is actually picked up: the cache-first helper would serve the old
+/// file forever. The local copy is still the fallback, so an offline launch keeps
+/// working, and identical bytes are not rewritten to disk.
+async fn refreshed_manifest_bytes(state: &AppState, url: &str) -> Result<(Vec<u8>, bool)> {
+    match state.api_client.download_manifest_bytes(url).await {
+        Ok(bytes) => {
+            Manifest::parse(&bytes)?; // never cache something we cannot read
+
+            let unchanged = crate::manifest_cache::read(url)
+                .map(|cached| cached == bytes)
+                .unwrap_or(false);
+
+            if !unchanged {
+                if let Err(e) = crate::manifest_cache::write(url, &bytes) {
+                    warn!("Could not cache manifest for {}: {}", url, e);
+                }
+                info!("Refreshed the cached manifest for {}", url);
+            }
+
+            Ok((bytes, false))
+        }
+        Err(e) => match crate::manifest_cache::read(url) {
+            Some(cached) if Manifest::parse(&cached).is_ok() => {
+                warn!(
+                    "Manifest refresh failed for {} ({}); using the cached copy",
+                    url, e
+                );
+                Ok((cached, true))
+            }
+            _ => Err(e),
+        },
+    }
+}
+
+async fn inspect_manifest(
+    state: &AppState,
+    trimmed: &str,
+    refresh: bool,
+) -> Result<ManifestInfo> {
     let (manifest_bytes, suggested_base_url) =
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            let (bytes, from_cache) = manifest_bytes_for(state, trimmed).await?;
+            let (bytes, from_cache) = if refresh {
+                refreshed_manifest_bytes(state, trimmed).await?
+            } else {
+                manifest_bytes_for(state, trimmed).await?
+            };
             info!(
                 "Manifest {} loaded from {} ({} bytes)",
                 trimmed,
@@ -1579,13 +1645,15 @@ pub async fn manifest_inspect(
             "Manifest path or URL is required".to_string(),
         ));
     }
-    inspect_manifest(&state, trimmed).await
+    inspect_manifest(&state, trimmed, false).await
 }
 
-/// Fetches a manifest ahead of time and keeps it on disk.
+/// Refreshes a manifest at startup and keeps it on disk.
 ///
-/// The launcher calls this once on startup for the featured build, so the
-/// first INSTALL click reads the manifest locally instead of hitting the API.
+/// The launcher calls this on every launch for the featured build: it downloads
+/// the manifest if the network allows, refreshes the local copy, and the INSTALL
+/// click then loads that file — no second round-trip, and a manifest the sponsor
+/// republished is actually used. Offline launches fall back to the cached copy.
 #[tauri::command]
 pub async fn manifest_prefetch(
     url: String,
@@ -1595,7 +1663,7 @@ pub async fn manifest_prefetch(
     if trimmed.is_empty() {
         return Err(AppError::Manifest("Manifest URL is required".to_string()));
     }
-    inspect_manifest(&state, trimmed).await
+    inspect_manifest(&state, trimmed, true).await
 }
 
 /// Cheap probe: does this CDN base actually serve the given chunk path?
@@ -2528,6 +2596,55 @@ mod game_process_tests {
     fn games_without_an_install_path_are_never_matched() {
         let game = installed("GameD", "", "gamed.exe");
         assert_eq!(find_installed_game_process(&game), None);
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    fn installed_with_platform(app_name: &str, platform: &str) -> InstalledGame {
+        InstalledGame {
+            app_name: app_name.to_string(),
+            title: app_name.to_string(),
+            version: "1.0".to_string(),
+            install_path: "C:\\Games\\game".to_string(),
+            executable: "game.exe".to_string(),
+            launch_parameters: String::new(),
+            install_size: 0,
+            can_run_offline: true,
+            requires_ot: false,
+            platform: platform.to_string(),
+            is_dlc: false,
+            base_urls: Vec::new(),
+            installed_at: None,
+        }
+    }
+
+    /// Steam rows belong to the Steam resolver; emitting them here as well would
+    /// show each Steam title twice, once as a bogus "Epic" card.
+    #[test]
+    fn local_items_skip_steam_titles() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "doki".to_string(),
+            installed_with_platform("doki", "Windows"),
+        );
+        map.insert(
+            "steam_367520".to_string(),
+            installed_with_platform("steam_367520", "steam"),
+        );
+        map.insert(
+            "steam_1091500".to_string(),
+            installed_with_platform("steam_1091500", "Windows"),
+        );
+
+        let items = installed_game_items(&map);
+
+        assert_eq!(items.len(), 1, "only the Epic install should survive");
+        assert_eq!(items[0].app_name, "doki");
+        assert_eq!(items[0].platform, "epic");
+        assert!(items[0].is_installed);
     }
 }
 

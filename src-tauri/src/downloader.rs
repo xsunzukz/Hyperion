@@ -38,8 +38,16 @@ impl Default for DownloadManager {
 
 impl DownloadManager {
     pub fn new() -> Self {
+        // Tuned for many small parallel chunk fetches. The old 30s ceiling
+        // applied to the whole request, so a chunk that was progressing but slow
+        // got aborted and restarted from zero; a short connect timeout plus a
+        // generous ceiling keeps slow links moving instead of retrying.
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(120))
+            .tcp_nodelay(true)
+            .tcp_keepalive(Duration::from_secs(30))
+            .pool_max_idle_per_host(64)
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -311,7 +319,8 @@ impl DownloadManager {
             let _ = app_handle.emit("download-progress", p.clone());
         }
 
-        let semaphore = Arc::new(Semaphore::new(max_workers.clamp(1, 32)));
+        let workers = max_workers.clamp(1, 64);
+        let semaphore = Arc::new(Semaphore::new(workers));
         let downloaded_bytes = Arc::new(AtomicU64::new(0));
         let downloaded_chunks = Arc::new(AtomicU64::new(0));
 
@@ -324,7 +333,7 @@ impl DownloadManager {
         let manifest_version = manifest.version;
 
         // Channel for task completions
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<()>>(max_workers * 2);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<()>>((workers * 4).max(8));
 
         // Spawn workers
         for chunk_info in needed_chunks {
@@ -379,8 +388,11 @@ impl DownloadManager {
                 let chunk_rel_path = chunk_info.path(manifest_version);
                 let chunk_url = format!("{}/{}", base_url.trim_end_matches('/'), chunk_rel_path);
 
-                // Fetch chunk with retry
-                let mut chunk_data = None;
+                // Fetch the raw chunk with retry. Parsing (zlib inflate + AES) and
+                // the file writes happen afterwards on the blocking pool: doing
+                // that inline starved the async runtime, which stalled every other
+                // request sharing the executor and capped real throughput.
+                let mut raw_chunk = None;
                 for retry in 0..3 {
                     if cancel.load(Ordering::SeqCst) {
                         return;
@@ -395,19 +407,19 @@ impl DownloadManager {
                     }
 
                     match request.send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            if let Ok(bytes) = resp.bytes().await {
-                                match Chunk::parse(&bytes, None) {
-                                    Ok(parsed) => {
-                                        chunk_data = Some(parsed.data);
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        warn!("Chunk parse error on attempt {}: {}", retry + 1, e);
-                                    }
-                                }
+                        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                            Ok(bytes) if !bytes.is_empty() => {
+                                raw_chunk = Some(bytes);
+                                break;
                             }
-                        }
+                            Ok(_) => warn!(
+                                "Chunk download returned an empty body on attempt {}",
+                                retry + 1
+                            ),
+                            Err(e) => {
+                                warn!("Chunk body read error on attempt {}: {}", retry + 1, e)
+                            }
+                        },
                         Ok(resp) => {
                             warn!(
                                 "Chunk download HTTP {} on attempt {}",
@@ -426,33 +438,66 @@ impl DownloadManager {
                     return;
                 }
 
-                let uncompressed = match chunk_data {
-                    Some(d) => d,
-                    None => {
-                        // A 404/403 here almost always means the base URL points at a
-                        // host that only mirrors the manifest, not the chunk files.
+                let Some(raw_chunk) = raw_chunk else {
+                    // A 404/403 here almost always means the base URL points at a
+                    // host that only mirrors the manifest, not the chunk files.
+                    let _ = tx
+                        .send(Err(AppError::Download(format!(
+                            "Chunk CDN '{}' does not serve this build (missing: {}). Sign in to Epic so the game data can be pulled from Epic's CDN, or set the chunk base URL in Options & Manifest.",
+                            base_url, chunk_url
+                        ))))
+                        .await;
+                    return;
+                };
+
+                // Decode and commit this chunk off the async runtime, so the
+                // network keeps draining while chunks are inflated and written.
+                let refs: Vec<ChunkRef> = chunk_refs
+                    .get(&chunk_info.guid)
+                    .map(|refs| refs.to_vec())
+                    .unwrap_or_default();
+                let guid = chunk_info.guid;
+
+                let stored = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+                    let chunk = Chunk::parse(&raw_chunk, None).map_err(|e| e.to_string())?;
+
+                    for r in refs {
+                        let slice_start = r.chunk_offset as usize;
+                        let slice_end = slice_start + r.size as usize;
+                        if slice_end > chunk.data.len() {
+                            return Err(format!(
+                                "payload is {} bytes but a file slice needs {}",
+                                chunk.data.len(),
+                                slice_end
+                            ));
+                        }
+                        write_at(&r.file_path, &chunk.data[slice_start..slice_end], r.file_offset)
+                            .map_err(|e| format!("could not write {:?}: {}", r.file_path, e))?;
+                    }
+
+                    Ok(())
+                })
+                .await;
+
+                match stored {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
                         let _ = tx
                             .send(Err(AppError::Download(format!(
-                                "Chunk CDN '{}' does not serve this build (missing: {}). Sign in to Epic so the game data can be pulled from Epic's CDN, or set the chunk base URL in Options & Manifest.",
-                                base_url, chunk_url
+                                "Chunk {:08x}-{:08x}-{:08x}-{:08x} failed: {}",
+                                guid[0], guid[1], guid[2], guid[3], e
                             ))))
                             .await;
                         return;
                     }
-                };
-
-                // Write chunk slices into respective files
-                if let Some(refs) = chunk_refs.get(&chunk_info.guid) {
-                    for r in refs {
-                        let slice_start = r.chunk_offset as usize;
-                        let slice_end = slice_start + r.size as usize;
-                        if slice_end <= uncompressed.len() {
-                            let slice = &uncompressed[slice_start..slice_end];
-                            if let Ok(mut f) = OpenOptions::new().write(true).open(&r.file_path) {
-                                let _ = f.seek(SeekFrom::Start(r.file_offset));
-                                let _ = f.write_all(slice);
-                            }
-                        }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(AppError::Download(format!(
+                                "Chunk worker did not finish: {}",
+                                e
+                            ))))
+                            .await;
+                        return;
                     }
                 }
 
@@ -582,4 +627,16 @@ impl DownloadManager {
         info!("Installation completed successfully for {}", app_name);
         Ok(())
     }
+}
+
+/// Writes `data` at an absolute offset in an already-sized file.
+///
+/// Every worker opens its own handle, so each has a private cursor and parallel
+/// chunk writers never fight over a shared file position. Failures are returned
+/// rather than swallowed: a silently dropped slice used to be counted as a
+/// completed chunk and left a corrupt install that still reported success.
+fn write_at(path: &std::path::Path, data: &[u8], offset: u64) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(data)
 }

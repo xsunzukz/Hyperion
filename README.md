@@ -1,245 +1,211 @@
-# Hyperion 
-A blazing-fast, native desktop game launcher for the Epic Games Store, built entirely from scratch in **Rust**, **Tauri 2**, and **React**.
+<div align="center">
 
-> **Note on Implementation**: This project is an independent clean-room native Rust implementation inspired by the open-source CLI project [Legendary](https://github.com/legendary-gl/legendary) by **derrod** (licensed under GNU GPL v3.0 or later). It contains **zero Python runtime dependencies, zero subprocess wrappers, and zero embedded legacy CLI binaries**. All protocols, manifests, chunks, and launching logic run natively in Rust.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/github_banner.png">
+  <source media="(prefers-color-scheme: light)" srcset="public/banner_white.png">
+  <img src="public/github_banner.png" alt="Hyperion Launcher" width="620">
+</picture>
 
----
+### A game launcher written from scratch in Rust.
 
-## Key Features
+Binary manifests, parallel chunk streams and SHA-1 verification — no Python runtime, no CLI wrappers, no embedded store client.
 
-- **Native Rust Core**:
-  - Direct HTTP/TLS communication using `reqwest` and `rustls`.
-  - Binary manifest parsing (`0x44BEC00C`), serializing, and delta patching.
-  - Chunk download engine with bounded concurrency (`tokio::sync::Semaphore`), streaming decompression (`flate2`), and direct file offset assembly.
-  - Full resume journal support (`.hyperion_resume.txt`) for interrupted downloads.
-  - Streaming file integrity verification (SHA1) without loading whole archives into memory.
-  - Secure offline and online launch exchange tokens.
-  - Cloud save path resolution (`{installdir}`, `{epicid}`, `{appdata}`, `{userdir}`) and synchronization with datastorage service.
-  - Local embedded persistence via SQLite (`rusqlite`).
-- **Tauri 2 Desktop Shell**:
-  - Typed IPC commands and asynchronous event streaming (`download-progress`).
-  - Least-privilege capabilities configuration.
-  - Native Windows process execution with working directory isolation.
-- **Modern Dark UI**:
-  - Built with React 19, TypeScript, Vite, and Tailwind CSS.
-  - Collapsible sidebar (icon rail, `Ctrl+B`, choice persisted) that stays border-aligned with the top bar.
-  - Responsive Grid and List views.
-  - Real-time download progress bar with MB/s speeds and ETAs.
-  - **Stop running games** from the card, the detail modal or the sidebar's *Running now* list — including
-    titles that were started before the launcher (processes are adopted by install folder).
-  - Full game maintenance modal: Launch, Verify Integrity, Cloud Save Sync, Open Directory, and Safe Uninstall.
-  - Featured build panel on Discover: one-click install of a bare Epic manifest, with the chunk CDN
-    resolved automatically (see *CDN resolution* below).
+[![Rust](https://img.shields.io/badge/Rust-1.78%2B-ff6600?style=for-the-badge&logo=rust&logoColor=white&labelColor=0a0a0b)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?style=for-the-badge&logo=tauri&logoColor=white&labelColor=0a0a0b)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=0a0a0b&labelColor=0a0a0b)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=0a0a0b)](https://www.typescriptlang.org/)
+[![Tests](https://img.shields.io/badge/tests-43%20passing-2ea043?style=for-the-badge&labelColor=0a0a0b)](#build--run)
+[![License](https://img.shields.io/badge/license-GPL--3.0--or--later-8b5cf6?style=for-the-badge&labelColor=0a0a0b)](LICENSE)
+
+[**Features**](#features) · [**Why it's fast**](#why-it-downloads-fast) · [**Steam**](#steam-integration) · [**Build**](#build--run) · [**Security**](#security--antivirus) · [**Credits**](#credits)
+
+</div>
+
+<br>
 
 ---
 
-## Architecture Overview
+Hyperion is a native desktop launcher that talks to Epic's services directly: it parses the binary manifest format, downloads content chunks in parallel, decrypts and inflates them, and assembles files by absolute offset — all in Rust, with a Tauri 2 shell and a React 19 interface.
+
+It exists because the interesting part of a launcher is the download pipeline, and rebuilding that pipeline from scratch is a genuinely hard piece of systems work. Every byte on disk arrives through code in this repository.
+
+**No Python. No `legendary` subprocess. No embedded CLI binary.**
+
+<br>
+
+## Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Download engine**
+
+- Parallel chunk fetching with a bounded semaphore (16 workers by default, up to 32 from the UI, hard cap 64)
+- Streaming zlib inflate and AES-256-GCM decryption
+- Decode and disk writes pushed to the blocking pool, so the network never stalls behind the CPU
+- Manual HTTP/TLS via `reqwest` + `rustls`
+- Resume journal (`.hyperion_resume.txt`) that survives a cancelled or crashed run
+- Streaming SHA-1 integrity verification — no archive is ever held in memory in full
+- CDN resolution: cached catalog → Epic assets API → manifest-relative, each candidate probed with a range request
+- Community manifests refreshed into a local cache on every launch — INSTALL loads the cached file, and an offline launch falls back to the last copy
+
+</td>
+<td width="50%" valign="top">
+
+**Launcher**
+
+- Epic OAuth sign-in through Epic's own web login — Hyperion never sees your password
+- Launch, verify, repair, cloud-sync and safe-uninstall from one modal
+- **Stop a running game**, including titles started outside the launcher (matched by install folder)
+- Minimise or close to the **system tray**, where a live menu lists the active downloads (percent, speed, ETA) and every installed game — click one to launch it. Left-click toggles the window; downloads keep running while it is hidden
+- Cloud saves using `{installdir}`, `{epicid}`, `{appdata}`, `{userdir}` path templates
+- Library scan for Steam titles via `libraryfolders.vdf` / `appmanifest_*.acf`
+- Local state in SQLite — no account database in the cloud
+
+</td>
+</tr>
+</table>
+
+**Interface** — React 19 + Tailwind, dark glass styling, collapsible icon rail (`Ctrl+B`, remembered), grid and list views, live MB/s and ETA, and a real event stream (`download-progress`) from the Rust core rather than polled guesses.
+
+<br>
+
+## Why it downloads fast
+
+Speed here is a sum of small decisions, not one magic knob:
+
+| Decision | Effect |
+|---|---|
+| Decode (`zlib`/AES) and file writes run on `spawn_blocking` | CPU work no longer starves the async runtime; other requests keep draining |
+| 16 chunk workers by default | High-latency routes need concurrency, not a bigger single stream |
+| 15 s connect / 120 s transfer timeouts | A slow-but-progressing chunk is never aborted and restarted from byte 0 |
+| `tcp_nodelay`, 30 s keepalive, 64-connection idle pool | Removes per-chunk handshake and Nagle stalls |
+| Absolute-offset writes, one handle per worker | No seek contention, no shared cursor between parallel writers |
+| Failed writes abort the download | A dropped slice used to be counted as a finished chunk and produced a corrupt install |
+
+<br>
+
+## Architecture
 
 ```
 hyperion/
-├── src/                          # React + TypeScript Frontend
-│   ├── components/               # UI Components
-│   │   ├── Sidebar.tsx           # Navigation & Account Badge
-│   │   ├── Header.tsx            # Search, Filter Pills & View Mode
-│   │   ├── GameCard.tsx          # Grid & List Game Representation
-│   │   ├── GameDetailModal.tsx   # Launch, Verify, Repair, Uninstall
-│   │   ├── DownloadsView.tsx     # Active Chunk Stream Queue
-│   │   ├── CloudSavesView.tsx    # Datastorage Sync Manager
-│   │   ├── SettingsView.tsx      # Downloader Workers & Preferences
-│   │   └── LoginModal.tsx        # Epic Games OAuth Flow
-│   ├── lib/
-│   │   └── ipc.ts                # Typed Tauri IPC & Browser Fallback
-│   ├── types.ts                  # Shared Data Models
-│   ├── index.css                 # Dark Glassmorphism Styling
-│   ├── App.tsx                   # Main Layout & State Orchestration
-│   └── main.tsx                  # React Entrypoint
+├── src/                       React 19 + TypeScript frontend
+│   ├── components/            Sidebar, Header, GameCard, GameDetailModal,
+│   │                          DownloadsView, CloudSavesView, SettingsView, LoginModal
+│   ├── lib/ipc.ts             Typed Tauri IPC + browser mock fallback
+│   └── App.tsx                Layout & state orchestration
 │
-└── src-tauri/                    # Native Rust Backend (Tauri 2)
-    ├── src/
-    │   ├── api.rs                # Epic Games API Client (OAuth, Assets, Manifests)
-    │   ├── manifest.rs           # Binary Manifest 0x44BEC00C Parser & Serializer
-    │   ├── chunk.rs              # 0xB1FE3AA2 Chunk Reader & Decompressor
-    │   ├── downloader.rs         # Bounded Concurrency Chunk Streamer
-    │   ├── installer.rs          # File Integrity Verifier & Uninstaller
-    │   ├── launcher.rs           # Native Process Launcher & Epic Args
-    │   ├── cloud_save.rs         # Path Template Resolver & Cloud Sync
-    │   ├── storage.rs            # SQLite Database (Installed Games, Cache)
-    │   ├── commands.rs           # Typed Tauri IPC Handlers
-    │   ├── state.rs              # AppState Management
-    │   ├── models.rs             # Core Data Structures
-    │   ├── error.rs              # AppError Types
-    │   ├── lib.rs                # App Lifecycle & Handlers Registration
-    │   ├── main.rs               # WinMain Entrypoint
-    │   └── tests.rs              # Unit & Integration Tests
-    ├── capabilities/             # Tauri 2 Security Permissions
-    ├── Cargo.toml                # Rust Dependencies
-    └── tauri.conf.json           # Tauri Desktop Configuration
+└── src-tauri/src/             Rust core (Tauri 2)
+    ├── api.rs                 Epic OAuth, assets API, manifest fetch
+    ├── manifest.rs            Binary manifest 0x44BEC00C — parser & serializer
+    ├── chunk.rs               Chunk container 0xB1FE3AA2 — inflate & AES-GCM
+    ├── downloader.rs          Bounded-concurrency chunk streamer
+    ├── installer.rs           Integrity verification & uninstall
+    ├── launcher.rs            Native process launch with Epic arguments
+    ├── cloud_save.rs          Path templates & datastorage sync
+    ├── storage.rs             SQLite persistence
+    ├── winproc.rs             TerminateProcess + toolhelp process-tree walk
+    └── steam/                 SteamCMD driver, scanner, VDF parser
 ```
 
----
+<details>
+<summary><b>Protocol notes</b></summary>
 
-## Steam Integration
+<br>
 
-Installed Steam titles are discovered from `libraryfolders.vdf` / `appmanifest_*.acf`, and
-store metadata comes from Valve's public APIs (no API key required).
+- **Manifests** are the binary `0x44BEC00C` format: a chunk data list (GUID, rolling hash, window size) plus a file manifest list whose parts reference chunk GUIDs with `offset` / `size` / `file_offset`.
+- **Chunks** are `0xB1FE3AA2` containers. The header carries a version, compressed size, 128-bit GUID, rolling hash, SHA-1, `stored_as` flags, and — from version 4 — a secret GUID plus a 16-byte GCM tag.
+- `stored_as` bit 0 means zlib-compressed, bit 1 means AES-256-GCM encrypted; the nonce is the first 12 bytes of the chunk's SHA-1 and the tag is appended before decryption.
+- Files are pre-sized with `set_len`, then every chunk slice is written at its absolute `file_offset`.
+- Epic bearer tokens are attached **only** to `*epicgames*` hosts, never to third-party mirrors.
 
-**Steam downloads run inside Hyperion** — no Steam client window, no Steam library
-involvement, and the files land in the install folder Hyperion was given (default
-`<default_install_dir>/<title>` or whatever path the caller passes). The engine is Valve's
-headless `SteamCMD`, fetched once into Hyperion's own data directory
-(`%LOCALAPPDATA%/Hyperion/steamcmd`) and driven directly by the Rust backend, with live
-download speed, byte progress, ETA and integrity validation streamed into the Downloads queue.
+</details>
 
-Valve only issues depot licences to an authenticated session, so a Steam sign-in is required
-before the first download:
+<br>
 
-- Credentials are entered once per app run in the in-app Steam sign-in prompt.
-- **They are verified with Valve before anything is stored**: Hyperion runs a throwaway SteamCMD
-  login (`+login … +quit`, no download) and rejects wrong passwords, missing Guard codes and
-  rate-limited accounts up front. Only a confirmed sign-in is remembered.
-- They live in **process memory only** — never written to SQLite or any file — and are dropped
-  when Hyperion exits. Ticking "Remember on this PC" stores an encrypted (DPAPI) copy instead.
-- If Steam Guard is enabled, the current authenticator code is requested, and re-requested if
-  it expires mid-download.
-- SteamCMD caches its own session on the machine after a successful login, so later runs may
-  not prompt at all.
+## Steam integration
 
-Unlike the Epic path (pure Rust, no subprocesses), the Steam path deliberately drives Valve's
-tool: a from-scratch implementation would have to reproduce the CM/protobuf protocol, ownership
-tickets and per-depot decryption keys, which is what SteamCMD already does.
+Installed Steam titles are discovered from `libraryfolders.vdf` and `appmanifest_*.acf`, with metadata straight from Valve's public APIs (no key needed).
 
----
+Steam *downloads* run inside Hyperion — no Steam client window, no Steam library involvement — by driving Valve's headless `SteamCMD`, fetched once into `%LOCALAPPDATA%/Hyperion/steamcmd`, with speed, byte progress, ETA and validation streamed into the Downloads queue.
 
-## Antivirus notes
+Valve only issues depot licences to an authenticated session, so a sign-in is required before the first download:
 
-A game launcher does several things heuristic engines dislike, so false positives are worth
-explaining:
+- Credentials are used once per app run and verified with Valve *before* anything is stored — a throwaway `+login … +quit` rejects wrong passwords, missing Guard codes and rate-limited accounts up front.
+- They live in **process memory only**, and are dropped when Hyperion exits. Opting into "Remember on this PC" stores a DPAPI-encrypted copy instead.
+- Steam Guard codes are requested when needed. SteamCMD caches its own session after a clean successful sign-in, so later downloads authenticate silently.
 
-- **SteamCMD is downloaded and executed.** It is Valve's own signed tool
-  (`steamcdn-a.akamaihd.net`), fetched once into `%LOCALAPPDATA%/Hyperion/steamcmd`, but
-  "download an executable, then run it" is a classic dropper pattern.
-- **The build is unsigned.** Windows SmartScreen and some engines flag unsigned installers; the
-  fix is code signing, not code changes.
-- **Steam's account files are never read.** The launcher does not open Steam's
-  `config/loginusers.vdf`, `ssfn*` files or its run keys — the exact pattern session-stealer
-  malware uses. The account name shown in the UI is whatever you signed in with (stored in
-  Hyperion's own SQLite settings); Steam's library is located via the `SteamPath` registry value
-  and `libraryfolders.vdf`, which contain no credentials.
-- What this project *avoided* on purpose: it does not shell out to `taskkill` or `reg query`.
-  Stopping games and SteamCMD uses `TerminateProcess` with a toolhelp process-tree walk, and the
-  Steam install path is read straight from the registry — see
-  [`winproc.rs`](src-tauri/src/winproc.rs) and [`scanner.rs`](src-tauri/src/steam/scanner.rs).
-  The launcher also writes no services, scheduled tasks, startup entries or run keys.
+Unlike the Epic path, this one deliberately delegates to Valve's tool: a from-scratch implementation would have to reproduce the CM/protobuf protocol, ownership tickets and per-depot keys.
 
-### How the launcher watches processes
+<br>
 
-Process monitoring is deliberately cheap, because a launcher that enumerates every process and
-reads its memory counters every few seconds looks exactly like a scanner:
+## Build & run
 
-| What | How | How often |
-|---|---|---|
-| "Is this game still running?" | `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject(h, 0)` on the PID it already knows | every 3 s (no enumeration, no memory reads) |
-| Games started outside the launcher | toolhelp snapshot of process **names**, then `QueryFullProcessImageNameW` only for name matches | startup and once a minute |
-| Machine diagnostics | `System::new()` + `refresh_memory()` — totals only | on demand |
+**Prerequisites** — Node 18+, Rust 1.78+ (tested on 1.97.1), and a Windows/Linux/macOS desktop.
 
-Never used anywhere in the codebase: `ReadProcessMemory`/`WriteProcessMemory`,
-`CreateRemoteThread`, `SetWindowsHookEx`, DLL injection, keyboard hooks or driver loading.
-Earlier versions refreshed `sysinfo`'s full process table (CPU + memory for every process) every
-3 seconds; that is gone, along with the `sysinfo` dependency in the polling path.
-
-If Defender flags the app or `steamcmd.exe`, add an exclusion for the launcher folder and for
-`%LOCALAPPDATA%/Hyperion`, and report the detection as a false positive.
-
----
-
-## Build & Run Instructions
-
-### Prerequisites
-- Node.js 18+ and npm
-- Rust 1.78+ (tested with Rust 1.97.1)
-- Windows 10/11, Linux, or macOS
-- Git (only needed to clone/push the repository)
-
-### 1. Install Frontend Dependencies
 ```bash
-npm install
+npm install                 # frontend deps
+cd src-tauri && cargo test  # 43 Rust tests
+cd .. && npm run tauri dev  # full native app
 ```
 
-### 2. Run Tests
-```bash
-cd src-tauri
-cargo test
-cd ..
-npm run build
-```
+| Command | What it does |
+|---|---|
+| `npm run dev` | Browser preview against the mock IPC backend |
+| `npm run tauri dev` | Real desktop app (Rust core + React UI) |
+| `npm run tauri build` | Production installer via Tauri bundler |
 
-### 3. Launch Development Server
-```bash
-# Pure Browser Preview Mode (Mock backend enabled)
-npm run dev
+`package-lock.json` and `Cargo.lock` are committed so builds are reproducible. Line endings are normalised to LF; binary assets are excluded from that.
 
-# Full Native Desktop App (Tauri 2 + Rust)
-npm run tauri dev
-```
+<br>
 
-### 4. Build Production Desktop Installer
-```bash
-npm run tauri build
-```
+## Security & antivirus
 
----
+A launcher does several things heuristics dislike, so the choices here are deliberate and verifiable in the code:
 
-## CDN resolution for custom manifests (`.manifest` installs)
+- **SteamCMD is downloaded and executed** — Valve's own signed tool, fetched once from `steamcdn-a.akamaihd.net`. "Download an executable, then run it" is a dropper pattern; that is what it is.
+- **The build is unsigned**, so SmartScreen will warn. The fix is code signing, not behaviour.
+- **Steam's account files are never read.** No `config/loginusers.vdf`, no `ssfn*`, no run keys — the exact pattern session-stealer malware uses. The Steam library is located via the `SteamPath` registry value and `libraryfolders.vdf`, which hold no credentials.
+- **No `taskkill`, no `reg query`, no shelling out.** Stopping a game uses `TerminateProcess` over a toolhelp process-tree walk; the Steam path comes straight from the registry.
+- **No services, scheduled tasks, startup entries or run keys.**
+- **No memory reading or injection** anywhere: no `ReadProcessMemory`, `CreateRemoteThread`, `SetWindowsHookEx`, DLL injection or drivers.
 
-Some community APIs only publish an Epic `.manifest` file; the game data itself still has to
-come from a CDN. The launcher therefore **caches manifests on first launch**: the featured
-build's manifest is fetched once when the app opens
-(`%LOCALAPPDATA%/Hyperion/manifests`, keyed by URL) and every INSTALL afterwards reads it
-from disk — no API round-trip, and the manifest still loads when the API is unreachable. The
-banner shows a *Manifest cached* chip once it is stored.
+Process monitoring stays cheap on purpose: a known PID is watched with `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject` every 3 s, and games started outside the launcher are found by process *name* snapshot at startup and once a minute.
 
-When installing from a manifest, the launcher:
+If Defender flags the app or `steamcmd.exe`, add an exclusion for the launcher folder and `%LOCALAPPDATA%/Hyperion`, then report the false positive.
 
-1. honours an explicit **CDN Chunk Base URL** if one is supplied;
-2. otherwise resolves Epic's CDN for the build — cached catalog entry first, then the Epic
-   assets API using both the manifest's app codename and the display title;
-3. falls back to the manifest's own directory for self-hosted builds;
-4. probes each candidate with a single range request and keeps the first base that actually
-   serves the build's chunks (logged as `Using chunk CDN <url>`).
-
-Epic OAuth tokens are attached **only** to `*epicgames*` hosts, never to third-party mirrors.
-If no candidate serves the build, the error names the base that was tried and points at the
-*CDN Chunk Base URL* field in **Direct Downloader → Options & Manifest**.
-
----
+<br>
 
 ## Repository notes
 
-- `package-lock.json` and `src-tauri/Cargo.lock` are committed so builds are reproducible.
-- Build output (`node_modules/`, `dist/`, `src-tauri/target/`, `src-tauri/gen/schemas/`) and
-  local state (`*.db`, `.env*`, `reference/`) are ignored — see `.gitignore`.
-- Line endings are normalised to LF via `.gitattributes`; binary assets stay untouched.
-- Licence: GNU GPL v3.0 or later — see [LICENSE](LICENSE).
-- Branding: `public/logo_clean.png` is the source artwork. `scripts/build_logo.py` derives the
-  transparent, cropped `public/hyperion logo.png` used by the UI, and `scripts/build_icons.py`
-  regenerates the Tauri icons in `src-tauri/icons` from it. Replace `logo_clean.png` and rerun
-  both scripts after an artwork change.
+- Build output (`node_modules/`, `dist/`, `src-tauri/target/`, `src-tauri/gen/schemas/`) and local state (`*.db`, `.env*`, `reference/`) are ignored.
+- Branding is generated, not hand-edited: `public/app logos.png` is the source sheet, `scripts/build_logo.py` crops and keys it into `public/hyperion logo.png`, and `scripts/build_icons.py` regenerates the Tauri icon set. Replace the sheet and rerun both.
+- `brag-output/` holds locally rendered promo video and licensed audio, so it is gitignored and never published with the source.
 
-### Pushing to a new remote
+<br>
 
-```bash
-git init -b main
-git add .
-git commit -m "Hyperion: native Epic launcher (Tauri 2 + Rust + React)"
-git remote add origin https://github.com/xsunzukz/Hyperion
-git push -u origin main
-```
+## Scope and disclaimer
 
----
+Hyperion is an **unofficial, unaffiliated** project. It is not endorsed by, or connected to, Epic Games or Valve.
 
-## Attribution and Licensing
-This project is licensed under the **GNU General Public License v3.0 or later** (GPL-3.0-or-later).
-Protocol details, manifest structures, and chunk serialization are based on research from the [Legendary project](https://github.com/legendary-gl/legendary) created by derrod.
+It is a **client**, not a store and not a DRM bypass: it signs in to *your* account and downloads only the titles that account is entitled to. It includes no content, no keys and no licence circumvention. Protocol understanding is derived from the open-source [Legendary](https://github.com/legendary-gl/legendary) project by **derrod** (GPL-3.0-or-later).
 
-Built by **xsunzukz**, with implementation assistance from **DeepSeek Harness** (AI coding agent) —
-see [CONTRIBUTORS.md](CONTRIBUTORS.md) for the breakdown of contributions.
+<br>
+
+## Credits
+
+| | |
+|---|---|
+| **Author** | [xsunzukz](https://github.com/xsunzukz) |
+| **Assistance** | DeepSeek Harness (AI coding agent) — breakdown in [CONTRIBUTORS.md](CONTRIBUTORS.md) |
+| **Protocol research** | [Legendary](https://github.com/legendary-gl/legendary) by derrod |
+| **Licence** | [GPL-3.0-or-later](LICENSE) |
+
+<div align="center">
+
+<br>
+
+**[⬆ back to top](#)** · Built with Rust, Tauri 2 and React — because the download pipeline was the fun part.
+
+</div>

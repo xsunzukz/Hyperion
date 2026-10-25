@@ -11,6 +11,7 @@ import { LoginModal } from './components/LoginModal';
 import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
 import {
+  AppSettings,
   DownloadProgress,
   GameItem,
   NavigationTab,
@@ -34,6 +35,8 @@ import {
   gameUninstall,
   listenToDownloadProgress,
   manifestPrefetch,
+  settingsGet,
+  settingsSave,
   steamClearCredentials,
   steamGetAuthStatus,
   steamSetCredentials,
@@ -78,6 +81,8 @@ export const App: React.FC = () => {
   // Bumped after a successful Steam sign-in so settings / downloader panels refresh
   const [steamAuthVersion, setSteamAuthVersion] = useState(0);
   const [runningGames, setRunningGames] = useState<Record<string, RunningGame>>({});
+  // Steam connected but the local library scan is off -> titles are hidden
+  const [steamLibraryHint, setSteamLibraryHint] = useState<AppSettings | null>(null);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -164,17 +169,30 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // First launch: pull the featured build's manifest once and keep it on disk,
-  // so the INSTALL button reads it locally from then on (no API round-trip).
+  // Every launch: refresh the featured build's manifest and keep the local copy,
+  // so the INSTALL button loads it from disk and a republished build is picked up.
   useEffect(() => {
     manifestPrefetch(SPONSOR_MANIFEST_URL)
       .then((info) => {
         console.info(
-          `Dauntless manifest cached${info?.build_version ? ` (build ${info.build_version})` : ''}`
+          `Dauntless manifest refreshed locally${info?.build_version ? ` (build ${info.build_version})` : ''}`
         );
       })
       .catch((e) => console.warn('Dauntless manifest prefetch failed:', e));
   }, []);
+
+  // Surface the opt-in when Steam is connected but its library is not scanned,
+  // otherwise the Library looks empty for no visible reason.
+  useEffect(() => {
+    (async () => {
+      try {
+        const [settings, steamAuth] = await Promise.all([settingsGet(), steamGetAuthStatus()]);
+        setSteamLibraryHint(steamAuth.logged_in && !settings.steam_library_scan ? settings : null);
+      } catch {
+        /* hint only */
+      }
+    })();
+  }, [steamAuthVersion]);
 
   // Ctrl/Cmd+B collapses or expands the sidebar, like most launcher shells
   useEffect(() => {
@@ -377,10 +395,14 @@ export const App: React.FC = () => {
     setSteamAuthRequest(null);
     setSteamAuthVersion((v) => v + 1);
 
+    // The backend turns on the Steam library scan on sign-in, so refresh the
+    // catalog to pull the Steam titles into the library right away.
+    loadGames(false);
+
     // Authorisation-only flow (no pending game): nothing to install
     if (!request.appName) {
       showNotification(
-        'Steam authorised — downloads will not ask for your password again',
+        'Steam connected — your Steam library is being added',
         'success'
       );
       return;
@@ -675,6 +697,32 @@ export const App: React.FC = () => {
                   Manage installed games, launch arguments, integrity verification, and DLCs.
                 </p>
               </div>
+
+              {steamLibraryHint && (
+                <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-sky-500/10 border border-sky-500/30">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-sky-200">Steam games are hidden</div>
+                    <div className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                      Your Steam account is connected, but scanning this PC&apos;s Steam library is off.
+                      Enable it to list the Steam games you own and have installed.
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await settingsSave({ ...steamLibraryHint, steam_library_scan: true });
+                        setSteamLibraryHint(null);
+                        await loadGames(false);
+                      } catch (e) {
+                        console.error('Could not enable the Steam library scan:', e);
+                      }
+                    }}
+                    className="shrink-0 px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition cursor-pointer"
+                  >
+                    Show Steam games
+                  </button>
+                </div>
+              )}
 
               {filteredGames.length === 0 ? (
                 <div className="p-16 text-center rounded-3xl glass-panel border border-zinc-800/80 bg-zinc-950/40">

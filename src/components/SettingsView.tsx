@@ -208,13 +208,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <input
               type="range"
               min="1"
-              max="16"
+              max="32"
               value={settings.max_workers}
               onChange={(e) => setSettings({ ...settings, max_workers: parseInt(e.target.value) })}
               className="w-full accent-orange-500 cursor-pointer"
             />
             <p className="text-xs text-zinc-400">
-              Controls maximum concurrent HTTP requests to game CDN nodes. Recommended: 8-12.
+              Controls maximum concurrent HTTP requests to game CDN nodes. More workers usually means
+              more throughput on high-latency connections; recommended 16, drop to 8 if the CPU or
+              disk can't keep up.
             </p>
           </div>
 

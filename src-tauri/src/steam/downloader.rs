@@ -186,6 +186,11 @@ pub struct SteamDownloadManager {
     /// Set when the cached SteamCMD session is rejected, so the next attempt
     /// falls back to the password instead of retrying the stale token.
     session_invalid: Arc<Mutex<bool>>,
+    /// Titles for in-flight installs, so the tray can name what is downloading
+    /// instead of showing a bare AppID.
+    active_titles: Arc<Mutex<HashMap<u32, String>>>,
+    /// Latest SteamCMD percentage per AppID, for the same reason.
+    active_percent: Arc<Mutex<HashMap<u32, f32>>>,
 }
 
 impl SteamDownloadManager {
@@ -194,7 +199,23 @@ impl SteamDownloadManager {
             active_pids: Arc::new(Mutex::new(HashMap::new())),
             cancelled: Arc::new(Mutex::new(HashSet::new())),
             session_invalid: Arc::new(Mutex::new(false)),
+            active_titles: Arc::new(Mutex::new(HashMap::new())),
+            active_percent: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Steam installs currently running, sorted by AppID, with a percentage once
+    /// the SteamCMD poller has reported one.
+    pub async fn active_downloads(&self) -> Vec<(u32, String, Option<f32>)> {
+        let titles = self.active_titles.lock().await;
+        let percent = self.active_percent.lock().await;
+
+        let mut list: Vec<(u32, String, Option<f32>)> = titles
+            .iter()
+            .map(|(id, title)| (*id, title.clone(), percent.get(id).copied()))
+            .collect();
+        list.sort_by_key(|(id, _, _)| *id);
+        list
     }
 
     /// Location SteamCMD keeps its own installation, config and cached session.
@@ -378,18 +399,33 @@ impl SteamDownloadManager {
         let mut lines = BufReader::new(stdout).lines();
         let mut transcript = String::new();
         let deadline = tokio::time::Instant::now() + APPROVAL_TIMEOUT;
+        // Set once Valve accepts the sign-in. From then on the engine only needs
+        // a moment to flush its session files before it quits on its own.
+        let mut confirmed = false;
+        let mut shutdown_deadline: Option<tokio::time::Instant> = None;
 
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let limit = shutdown_deadline.unwrap_or(deadline);
+            let remaining = limit.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 let _ = child.kill().await;
-                return Err(guard_timeout_message(&transcript));
+                // A sign-in that already succeeded must not be reported as a
+                // timeout just because the shutdown took longer than we waited.
+                return if confirmed {
+                    Ok(())
+                } else {
+                    Err(guard_timeout_message(&transcript))
+                };
             }
 
             let line = match tokio::time::timeout(remaining, lines.next_line()).await {
                 Err(_) => {
                     let _ = child.kill().await;
-                    return Err(guard_timeout_message(&transcript));
+                    return if confirmed {
+                        Ok(())
+                    } else {
+                        Err(guard_timeout_message(&transcript))
+                    };
                 }
                 Ok(Ok(Some(line))) => line,
                 // EOF or read error: SteamCMD is done talking
@@ -404,10 +440,21 @@ impl SteamDownloadManager {
 
             // SteamCMD announces a successful auth as "Logging in user 'x' ... to
             // Steam Public...OK" — there is no separate "Logged in OK" line.
+            //
+            // Do NOT kill the engine on this line. SteamCMD only writes the
+            // reusable session — the remembered account in `config/config.vdf`
+            // and this machine's `ssfn*` Steam Guard sentry — while it shuts
+            // down normally. Killing it here threw that token away, so the next
+            // download had to sign in with the password and ping the phone for a
+            // brand-new approval. Keep draining until it exits by itself.
             if login_confirmed(&line) {
-                info!("Steam confirmed the sign-in");
-                let _ = child.kill().await;
-                return Ok(());
+                if !confirmed {
+                    info!("Steam confirmed the sign-in; letting SteamCMD persist the session");
+                }
+                confirmed = true;
+                shutdown_deadline =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(45));
+                continue;
             }
 
             // A code prompt: feed through the code typed in the dialog, if any
@@ -432,6 +479,21 @@ impl SteamDownloadManager {
         }
 
         let _ = child.wait().await;
+
+        if confirmed {
+            if cached_session_exists(username) {
+                info!(
+                    "SteamCMD kept a reusable session for '{}'; later downloads authenticate silently",
+                    username
+                );
+            } else {
+                warn!(
+                    "SteamCMD signed in but left no reusable session behind — the next download may ask for a Steam Guard approval again"
+                );
+            }
+            return Ok(());
+        }
+
         classify_login_output(&transcript)
     }
 
@@ -566,6 +628,10 @@ impl SteamDownloadManager {
         {
             let mut pids = self.active_pids.lock().await;
             pids.insert(app_id, pid);
+            self.active_titles
+                .lock()
+                .await
+                .insert(app_id, title.clone());
         }
 
         // Drain stderr asynchronously to prevent pipe deadlocks
@@ -579,6 +645,8 @@ impl SteamDownloadManager {
         }
 
         let active_pids_clone = Arc::clone(&self.active_pids);
+        let active_titles_clone = Arc::clone(&self.active_titles);
+        let active_percent_clone = Arc::clone(&self.active_percent);
         let session_invalid = Arc::clone(&self.session_invalid);
         let app_name = format!("steam_{}", app_id);
         let title_clone = title.clone();
@@ -598,6 +666,7 @@ impl SteamDownloadManager {
             title_clone.clone(),
             app_handle_clone.clone(),
             Arc::clone(&self.cancelled),
+            Arc::clone(&self.active_percent),
             log_path,
             log_offset,
         ));
@@ -871,6 +940,8 @@ impl SteamDownloadManager {
                 let mut pids = active_pids_clone.lock().await;
                 pids.remove(&app_id);
             }
+            active_titles_clone.lock().await.remove(&app_id);
+            active_percent_clone.lock().await.remove(&app_id);
 
             match status {
                 Ok(exit_code)
@@ -983,6 +1054,7 @@ impl SteamDownloadManager {
             let mut pids = self.active_pids.lock().await;
             pids.remove(&app_id)
         };
+        self.active_titles.lock().await.remove(&app_id);
 
         // Flag the cancellation so a Steam client mirror loop stops even when no
         // SteamCMD process is associated with the AppID.
@@ -1277,6 +1349,8 @@ async fn poll_download_progress(
     title: String,
     app_handle: AppHandle,
     cancelled: Arc<Mutex<HashSet<u32>>>,
+    // Shared with the tray, so an in-flight SteamCMD install reports progress.
+    progress: Arc<Mutex<HashMap<u32, f32>>>,
     log_path: PathBuf,
     log_offset: u64,
 ) {
@@ -1416,6 +1490,8 @@ async fn poll_download_progress(
             0
         };
 
+        progress.lock().await.insert(app_id, percent);
+
         if percent as i32 != last_logged_percent {
             last_logged_percent = percent as i32;
             debug!(
@@ -1450,6 +1526,9 @@ async fn poll_download_progress(
             },
         );
     }
+
+    // Stop reporting progress once the poller is done with this AppID.
+    progress.lock().await.remove(&app_id);
 }
 
 /// Writes `steam_appid.txt` into an install folder.
@@ -1471,27 +1550,123 @@ pub fn ensure_steam_appid_file(dir: &Path, app_id: u32) {
 
 /// True when SteamCMD already holds a cached session for this account.
 ///
-/// SteamCMD records remembered accounts in `config/loginusers.vdf`; when one is
-/// present a bare `+login <user>` authenticates with the stored token instead of
-/// the password, which is what keeps Valve from sending a new sign-in approval
-/// to the Steam Mobile app on every download.
+/// When one is present, a bare `+login <user>` authenticates with the stored
+/// token instead of the password, which is what keeps Valve from sending a new
+/// sign-in approval to the Steam Mobile app on every download.
+///
+/// Three things can carry that session, and all three have to be honoured:
+/// the `ssfn*` sentry (this machine's Steam Guard trust token), the Steam
+/// client-style `config/loginusers.vdf`, and — on SteamCMD itself — the
+/// remembered account stored in `config/config.vdf`. Checking only
+/// `loginusers.vdf` never matched a SteamCMD install, so every download fell
+/// back to a password sign-in and a fresh phone approval.
 pub fn cached_session_exists(username: &str) -> bool {
-    let path = SteamDownloadManager::steamcmd_dir()
-        .join("config")
-        .join("loginusers.vdf");
+    let dir = SteamDownloadManager::steamcmd_dir();
 
-    let Ok(content) = std::fs::read_to_string(path) else {
+    if sentry_exists_in(&dir) {
+        return true;
+    }
+
+    let config = dir.join("config");
+
+    if let Ok(content) = std::fs::read_to_string(config.join("loginusers.vdf")) {
+        if loginusers_has_account(&content, username) {
+            return true;
+        }
+    }
+
+    match std::fs::read_to_string(config.join("config.vdf")) {
+        Ok(content) => config_vdf_holds_token(&content, username),
+        Err(_) => false,
+    }
+}
+
+/// True when SteamCMD's `config.vdf` holds a *usable* login for this account.
+///
+/// The `Accounts` list on its own is not enough — it only remembers the account
+/// name, so trusting it made the engine attempt a bare `+login` that dies with
+/// "Cached credentials not found" and aborts the download. The actual token
+/// lives in `ConnectCache`, next to that list.
+fn config_vdf_holds_token(content: &str, username: &str) -> bool {
+    if !accounts_has_account(content, username) {
         return false;
-    };
+    }
 
-    loginusers_has_account(&content, username)
+    let vdf = crate::steam::vdf::parse_vdf(content);
+    vdf.get("InstallConfigStore")
+        .and_then(|store| store.get("Software"))
+        .and_then(|software| software.get("Valve"))
+        .and_then(|valve| valve.get("Steam"))
+        .and_then(|steam| steam.get("ConnectCache"))
+        .and_then(|cache| cache.as_object())
+        .map(|cache| !cache.is_empty())
+        .unwrap_or(false)
+}
+
+/// True when an `ssfn*` sentry sits in `dir` or in `dir/config`.
+fn sentry_exists_in(dir: &Path) -> bool {
+    fn has_sentry(path: &Path) -> bool {
+        std::fs::read_dir(path)
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .starts_with("ssfn")
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    has_sentry(dir) || has_sentry(&dir.join("config"))
+}
+
+/// Parses SteamCMD's `config.vdf` and reports whether it remembers this account.
+///
+/// SteamCMD keeps `"Accounts" { "<account>" { "SteamID" … } }` under
+/// `InstallConfigStore/Software/Valve/Steam`, unlike the Steam client which
+/// writes `loginusers.vdf`.
+fn accounts_has_account(content: &str, username: &str) -> bool {
+    let vdf = crate::steam::vdf::parse_vdf(content);
+    vdf.get("InstallConfigStore")
+        .and_then(|store| store.get("Software"))
+        .and_then(|software| software.get("Valve"))
+        .and_then(|valve| valve.get("Steam"))
+        .and_then(|steam| steam.get("Accounts"))
+        .and_then(|accounts| accounts.as_object())
+        .map(|accounts| {
+            accounts
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(username))
+        })
+        .unwrap_or(false)
 }
 
 /// Makes SteamCMD forget the remembered account, so "Disconnect" really logs
 /// out: the next download has to sign in again instead of reusing the cached
 /// session behind the UI's back.
 pub fn forget_cached_session() {
-    forget_session_in(&SteamDownloadManager::steamcmd_dir().join("config"));
+    let dir = SteamDownloadManager::steamcmd_dir();
+    forget_session_in(&dir.join("config"));
+    // Sentries normally sit next to steamcmd.exe rather than in `config\`, so
+    // clearing only the config directory would leave the account silently
+    // signed in after a "Disconnect".
+    forget_sentries_in(&dir);
+}
+
+/// Removes this machine's Steam Guard sentries from `dir`.
+fn forget_sentries_in(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with("ssfn") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Removes the account files from a SteamCMD `config` directory.
@@ -1828,9 +2003,9 @@ fn parse_steamcmd_progress_line(line: &str) -> Option<(f64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_login_output, forget_session_in, last_logged_progress, login_confirmed,
-        loginusers_has_account, parse_steamcmd_progress_line, pick_launch_exe,
-        requires_steam_guard,
+        accounts_has_account, classify_login_output, config_vdf_holds_token, forget_session_in,
+        last_logged_progress, login_confirmed, loginusers_has_account,
+        parse_steamcmd_progress_line, pick_launch_exe, requires_steam_guard,
     };
 
     #[test]
@@ -2008,6 +2183,47 @@ Unloading Steam API...OK";
     fn does_not_confirm_on_the_login_start_line_alone() {
         assert!(!login_confirmed("Logging in using username/password."));
         assert!(!login_confirmed("Steam Guard code provided."));
+    }
+
+    #[test]
+    fn reads_the_account_steamcmd_remembers_in_config_vdf() {
+        // Shape SteamCMD actually writes: no loginusers.vdf anywhere, the
+        // remembered account lives inside config.vdf.
+        let vdf = "\"InstallConfigStore\"
+{
+\t\"Software\"
+\t{
+\t\t\"Valve\"
+\t\t{
+\t\t\t\"Steam\"
+\t\t\t{
+\t\t\t\t\"Accounts\"
+\t\t\t\t{
+\t\t\t\t\t\"sunzukz\"
+\t\t\t\t\t{
+\t\t\t\t\t\t\"SteamID\"\t\t\"76561199517025580\"
+\t\t\t\t\t}
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t}
+}
+";
+        assert!(accounts_has_account(vdf, "sunzukz"));
+        assert!(accounts_has_account(vdf, "SunZukZ"));
+        assert!(!accounts_has_account(vdf, "someone_else"));
+        assert!(!accounts_has_account("", "sunzukz"));
+
+        // A remembered name is not a session: without a token a bare `+login`
+        // fails with "Cached credentials not found".
+        assert!(!config_vdf_holds_token(vdf, "sunzukz"));
+
+        let with_token = vdf.replace(
+            "\"Accounts\"",
+            "\"ConnectCache\"\n\t\t\t\t{\n\t\t\t\t\t\"76561199517025580\"\t\t\"token\"\n\t\t\t\t}\n\t\t\t\t\"Accounts\"",
+        );
+        assert!(config_vdf_holds_token(&with_token, "sunzukz"));
+        assert!(!config_vdf_holds_token(&with_token, "someone_else"));
     }
 
     #[test]

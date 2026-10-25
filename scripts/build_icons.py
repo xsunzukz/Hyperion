@@ -1,43 +1,25 @@
 """Rebuild the app icons from the generated logo.
 
-Run after scripts/build_logo.py: takes `public/hyperion logo.png` (transparent
-white mark) and writes the Windows/macOS/Tauri icon set into src-tauri/icons.
-The mark sits on the same near-black rounded tile the sidebar uses, so the icon
-reads correctly on light and dark taskbars alike.
+Run after scripts/build_logo.py: `public/hyperion logo.png` already contains the
+finished tile (rounded corners, transparent outside), so the icon set is just
+that artwork at the sizes Tauri and Windows expect.
 """
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGO = ROOT / "public" / "hyperion logo.png"
 ICONS = ROOT / "src-tauri" / "icons"
 
-TILE = (11, 11, 14, 255)  # #0b0b0e
-RING = (255, 102, 0, 90)  # accent orange, soft
-
 
 def render(size: int) -> Image.Image:
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    radius = int(size * 0.22)
-
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=TILE)
-    inset = max(1, size // 32)
-    draw.rounded_rectangle(
-        (inset, inset, size - 1 - inset, size - 1 - inset),
-        radius=max(1, radius - inset),
-        outline=RING,
-        width=max(1, size // 96),
-    )
-
     logo = Image.open(LOGO).convert("RGBA")
-    target_w = int(size * 0.72)
-    target_h = max(1, round(logo.height * target_w / logo.width))
-    logo = logo.resize((target_w, target_h), Image.LANCZOS)
-
-    canvas.alpha_composite(logo, ((size - logo.width) // 2, (size - logo.height) // 2))
-    return canvas
+    # Tauri wants square icons; the source already is, this is only a guard
+    side = max(logo.size)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.paste(logo, ((side - logo.width) // 2, (side - logo.height) // 2), logo)
+    return canvas.resize((size, size), Image.LANCZOS)
 
 
 def main() -> None:

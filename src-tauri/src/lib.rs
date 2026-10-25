@@ -13,12 +13,14 @@ pub mod secret;
 pub mod state;
 pub mod steam;
 pub mod storage;
+pub mod tray;
 pub mod winproc;
 
 #[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
+use tauri::WindowEvent;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub fn run() {
@@ -93,9 +95,28 @@ pub fn run() {
             commands::steam_clear_credentials,
             commands::steam_set_guard_code,
         ])
-        .setup(|_app| {
+        .setup(|app| {
+            // Tray icon, plus the loop that keeps its menu listing the active
+            // downloads and the installed games.
+            crate::tray::setup(app.handle())?;
+
             tracing::info!("Hyperion Tauri application setup completed");
             Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            // Closing keeps the launcher alive in the tray: downloads, the Steam
+            // engine and the running-game watcher all keep going.
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            // Minimising parks it in the tray instead of the taskbar.
+            WindowEvent::Resized(_) => {
+                if window.is_minimized().unwrap_or(false) && window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                }
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running hyperion application");

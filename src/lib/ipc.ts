@@ -158,7 +158,7 @@ let mockGames: GameItem[] = [
 
 let mockSettings: AppSettings = {
   default_install_dir: 'D:\\Games',
-  max_workers: 8,
+  max_workers: 16,
   throttle_mbps: 0,
   language: 'en',
   auto_update: true,

@@ -288,7 +288,7 @@ impl Storage {
                         settings.default_install_dir = val;
                     }
                 }
-                "max_workers" => settings.max_workers = val.parse().unwrap_or(8),
+                "max_workers" => settings.max_workers = val.parse().unwrap_or(16),
                 "throttle_mbps" => settings.throttle_mbps = val.parse().unwrap_or(0),
                 "language" => settings.language = val,
                 "auto_update" => settings.auto_update = val == "true",
