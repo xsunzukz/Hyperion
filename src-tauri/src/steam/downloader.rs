@@ -282,19 +282,62 @@ impl SteamDownloadManager {
     /// it to reject wrong credentials before anything is stored or downloaded.
     ///
     /// Steam Guard approvals arrive on the user's phone and can take a while, so
-    /// the process is kept alive (stdin open, output streamed) and given a
-    /// generous window instead of being judged the instant it prints a prompt.
+    /// each attempt keeps the process alive (stdin open, output streamed) and we
+    /// retry a couple of times if the approval did not land in time — SteamCMD
+    /// gives up on its own timer, which a single attempt cannot extend.
     pub async fn verify_login(
         username: &str,
         password: &str,
         guard_code: Option<&str>,
     ) -> Result<(), String> {
-        const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+        const ATTEMPTS: usize = 3;
+        // Hard ceiling across all attempts, so a forgotten dialog cannot spin forever
+        const OVERALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
         let username = username.trim();
         if username.is_empty() || password.is_empty() {
             return Err("Steam account name and password are both required".to_string());
         }
+
+        let started = tokio::time::Instant::now();
+        let mut last_error = String::new();
+
+        for attempt in 1..=ATTEMPTS {
+            match Self::login_once(username, password, guard_code).await {
+                Ok(()) => return Ok(()),
+                Err(reason) => {
+                    // A wrong password, a rate limit or a network problem will not
+                    // be fixed by asking Valve again — only the pending approval can.
+                    let retryable = mentions_guard(&reason);
+                    last_error = reason;
+
+                    if !retryable
+                        || attempt == ATTEMPTS
+                        || started.elapsed() + std::time::Duration::from_secs(10) >= OVERALL_BUDGET
+                    {
+                        break;
+                    }
+
+                    info!(
+                        "Steam sign-in not confirmed (attempt {}/{}): {} — asking again",
+                        attempt, ATTEMPTS, last_error
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+            }
+        }
+
+        Err(last_error)
+    }
+
+    /// One SteamCMD login round-trip, waiting up to three minutes for the
+    /// Steam Guard approval to arrive on the user's phone.
+    async fn login_once(
+        username: &str,
+        password: &str,
+        guard_code: Option<&str>,
+    ) -> Result<(), String> {
+        const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
         let steamcmd_exe = Self::ensure_steamcmd().await?;
 
