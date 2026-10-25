@@ -58,10 +58,11 @@ It exists because the interesting part of a launcher is the download pipeline, a
 - Epic OAuth sign-in through Epic's own web login — Hyperion never sees your password
 - Launch, verify, repair, cloud-sync and safe-uninstall from one modal
 - **Stop a running game**, including titles started outside the launcher (matched by install folder)
-- Minimise or close to the **system tray**, where a live menu lists the active downloads (percent, speed, ETA) and every installed game — click one to launch it. Left-click toggles the window; downloads keep running while it is hidden
+- Closing the window parks it in the **system tray** (minimising stays a normal minimise), with a live menu: active downloads with percent, speed and ETA, and every installed game — click one to launch it. Left-click toggles the window
 - Cloud saves using `{installdir}`, `{epicid}`, `{appdata}`, `{userdir}` path templates
 - Library scan for Steam titles via `libraryfolders.vdf` / `appmanifest_*.acf`
 - Local state in SQLite — no account database in the cloud
+- Single instance: launching the app again raises the running window instead of starting a second copy
 
 </td>
 </tr>

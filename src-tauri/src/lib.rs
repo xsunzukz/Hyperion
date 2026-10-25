@@ -44,6 +44,12 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        // Must be registered before any other plugin, so a second launch is
+        // rejected before it touches the database, the tray or SteamCMD.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tracing::info!("Second launch forwarded to the running instance");
+            crate::tray::reveal_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
@@ -104,17 +110,13 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            // Closing keeps the launcher alive in the tray: downloads, the Steam
-            // engine and the running-game watcher all keep going.
+            // Closing parks the launcher in the tray: downloads, the Steam
+            // engine and the running-game watcher all keep going. Minimising
+            // stays a normal minimise — the taskbar is still where people expect
+            // a minimised window to be.
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
-            }
-            // Minimising parks it in the tray instead of the taskbar.
-            WindowEvent::Resized(_) => {
-                if window.is_minimized().unwrap_or(false) && window.is_visible().unwrap_or(false) {
-                    let _ = window.hide();
-                }
             }
             _ => {}
         })
