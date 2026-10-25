@@ -64,6 +64,7 @@ It exists because the interesting part of a launcher is the download pipeline, a
 - Local state in SQLite — no account database in the cloud
 - Single instance: launching the app again raises the running window instead of starting a second copy
 - Staged startup splash: runtime files → SteamCMD (first run only) → Epic + Steam library, with real per-stage progress and a "continue anyway" escape hatch
+- Sign-in gate after startup, with **Epic sign-in as the primary path** (Epic's own login page handles the password); a one-session offline skip keeps installed games playable
 
 </td>
 </tr>

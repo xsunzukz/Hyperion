@@ -9,6 +9,7 @@ import { SettingsView } from './components/SettingsView';
 import { AboutView } from './components/AboutView';
 import { BootScreen } from './components/BootScreen';
 import { LoginModal } from './components/LoginModal';
+import { LoginGate } from './components/LoginGate';
 import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
 import {
@@ -87,6 +88,8 @@ export const App: React.FC = () => {
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   // Startup splash: staged bootstrap (files -> SteamCMD -> library), then the shell.
   const [booted, setBooted] = useState(false);
+  // Set when the user chooses "continue offline" on the sign-in gate.
+  const [skipLogin, setSkipLogin] = useState(false);
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
@@ -301,6 +304,8 @@ export const App: React.FC = () => {
     try {
       await authLogout();
       setUser(null);
+      // Signing out puts the gate back: the offline skip was for that session only.
+      setSkipLogin(false);
       showNotification('Logged out successfully', 'info');
       loadGames(false);
     } catch (e) {
@@ -874,6 +879,14 @@ export const App: React.FC = () => {
           gameTitle={steamAuthRequest.title}
           onClose={() => setSteamAuthRequest(null)}
           onSubmit={handleSteamAuthSubmit}
+        />
+      )}
+      {/* Sign-in gate: the shell stays mounted underneath, so the real Epic
+          login modal (z-50) opens on top of it. */}
+      {!user && !skipLogin && (
+        <LoginGate
+          onSignIn={() => setIsLoginModalOpen(true)}
+          onSkip={() => setSkipLogin(true)}
         />
       )}
     </div>
