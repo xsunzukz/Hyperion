@@ -10,9 +10,7 @@ import {
   Lock,
 } from 'lucide-react';
 
-// ============================================================================
-// 🔗 CONFIGURE YOUR REPOSITORY URL HERE (Update whenever your repo is ready!)
-// ============================================================================
+/** Project repository: shown on the About page and opened by the source card. */
 export const MY_PROJECT_REPO_URL = 'https://github.com/xsunzukz/Hyperion';
 
 // 🔗 Original Research & Project Credits
@@ -70,10 +68,11 @@ export const AboutView: React.FC = () => {
 
       {/* Links & Legal List Section */}
       <div className="rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-2.5 space-y-2 shadow-2xl backdrop-blur-md">
-        {/* 1. My Project Source Code (Configurable) */}
+        {/* 1. Project source code */}
         <button
           onClick={handleOpenMyRepo}
           className="w-full flex items-center justify-between p-4 rounded-xl border border-zinc-800/60 bg-zinc-900/40 hover:bg-zinc-800/50 hover:border-zinc-700/80 transition-all duration-200 group text-left cursor-pointer"
+          title={`Open ${MY_PROJECT_REPO_URL} in your browser`}
         >
           <div className="flex items-center gap-4">
             <div className="w-10 h-10 rounded-xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-center text-zinc-400 group-hover:text-orange-400 group-hover:border-orange-500/30 transition">
@@ -83,8 +82,8 @@ export const AboutView: React.FC = () => {
               <div className="text-sm font-semibold text-white group-hover:text-orange-300 transition">
                 Hyperion source code
               </div>
-              <div className="text-xs text-zinc-400">
-                Project GitHub repository (link your repo here)
+              <div className="text-xs font-mono text-zinc-400 group-hover:text-zinc-300 transition">
+                {MY_PROJECT_REPO_URL.replace(/^https?:\/\//, '')}
               </div>
             </div>
           </div>
