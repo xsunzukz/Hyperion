@@ -241,6 +241,27 @@ impl Storage {
         Ok(res)
     }
 
+    /// Drops cached Epic titles not in `keep` (Steam rows are left alone).
+    /// Returns how many rows went.
+    pub fn prune_epic_catalog(&self, keep: &[String]) -> Result<usize> {
+        let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+        let conn = self.conn.lock().unwrap();
+        let stale: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT app_name FROM catalog_cache
+                 WHERE namespace NOT IN ('steam', 'steam_ignored') AND app_name NOT LIKE 'steam\\_%' ESCAPE '\\'",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok())
+                .filter(|name| !keep.contains(name.as_str()))
+                .collect()
+        };
+        for app_name in &stale {
+            conn.execute("DELETE FROM catalog_cache WHERE app_name = ?1", params![app_name])?;
+        }
+        Ok(stale.len())
+    }
+
     pub fn get_cached_catalog_item(&self, app_name: &str) -> Result<Option<CachedCatalogItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

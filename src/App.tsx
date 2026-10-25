@@ -49,6 +49,21 @@ import sponsorBanner from './assets/sponsor.webp';
 
 /** Featured community build published as a bare Epic manifest */
 const SPONSOR_MANIFEST_URL = 'https://api.mysticfox.dev/v2/Dauntless_1.14.7.647472.manifest';
+/** The app name inside that manifest: Epic's codename for Dauntless */
+const SPONSOR_APP_NAME = 'Jackal';
+const SPONSOR_TITLE = 'Dauntless';
+
+/** Without an Epic catalog entry the featured build would show up as a bare
+ *  "Jackal" card with stock art. */
+const withFeaturedArt = (game: GameItem): GameItem =>
+  game.app_name === SPONSOR_APP_NAME
+    ? {
+        ...game,
+        title: game.title === SPONSOR_APP_NAME ? SPONSOR_TITLE : game.title,
+        icon_url: game.icon_url || sponsorBanner,
+        banner_url: game.banner_url || sponsorBanner,
+      }
+    : game;
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -227,17 +242,28 @@ export const App: React.FC = () => {
     initAuth();
   }, []);
 
-  // Fetch games catalog
+  // Fetch games catalog. Loads overlap (sign-in, finished downloads, the
+  // Refresh button), so an older answer must not replace a newer library —
+  // except a forced refresh, which carries the freshest data whenever it lands.
+  const loadSeq = useRef(0);
+  const appliedSeq = useRef(0);
+  const loadsInFlight = useRef(0);
   const loadGames = async (forceRefresh = false) => {
+    const seq = ++loadSeq.current;
+    loadsInFlight.current += 1;
     setIsRefreshing(true);
     try {
       const list = await catalogGetGames(forceRefresh);
-      setGames(list);
+      if (forceRefresh || seq > appliedSeq.current) {
+        appliedSeq.current = Math.max(appliedSeq.current, seq);
+        setGames(list.map(withFeaturedArt));
+      }
     } catch (e) {
       console.error('Failed to load games:', e);
       showNotification('Failed to retrieve game catalog from backend', 'error');
     } finally {
-      setIsRefreshing(false);
+      loadsInFlight.current -= 1;
+      if (loadsInFlight.current === 0) setIsRefreshing(false);
     }
   };
 
@@ -353,6 +379,11 @@ export const App: React.FC = () => {
   };
 
   const handleInstall = async (game: GameItem) => {
+    // Dauntless installs from the community build, never Epic's delisted one
+    if (game.app_name === SPONSOR_APP_NAME) {
+      handleSponsorInstall();
+      return;
+    }
     try {
       if (game.platform === 'steam') {
         showNotification(`Preparing in-app download for ${game.title}`, 'info');
@@ -795,14 +826,22 @@ export const App: React.FC = () => {
               onResume={handleResumeDownload}
               onCancel={handleCancelOrDismissDownload}
               onRetry={(appName) => {
+                if (appName === SPONSOR_APP_NAME) {
+                  handleSponsorInstall();
+                  return;
+                }
                 const game = games.find((g) => g.app_name === appName);
                 if (game) handleInstall(game);
                 else gameInstall(appName);
               }}
               onConfigure={(appName) => {
+                if (appName === SPONSOR_APP_NAME) {
+                  handleSponsorInstall();
+                  return;
+                }
                 const game = games.find((g) => g.app_name === appName);
                 setCustomManifestGame(game || null);
-                setCustomManifestUrl(game ? null : appName === 'Dauntless' ? SPONSOR_MANIFEST_URL : null);
+                setCustomManifestUrl(null);
                 setIsCustomManifestOpen(true);
               }}
             />
@@ -851,6 +890,7 @@ export const App: React.FC = () => {
           }}
           presetGame={customManifestGame}
           presetManifestUrl={customManifestUrl}
+          presetTitle={customManifestUrl === SPONSOR_MANIFEST_URL ? SPONSOR_TITLE : null}
           onRequestSteamLogin={() => requestSteamAuth('full', '', '')}
           steamAuthVersion={steamAuthVersion}
           onInstallStarted={(appName) => {

@@ -723,24 +723,39 @@ pub async fn auth_resume_session(state: State<'_, Arc<AppState>>) -> Result<Opti
             session.account_id
         );
 
-        let is_valid = state
-            .api_client
-            .verify_session(&session.access_token)
-            .await
-            .unwrap_or(false);
+        // Renews an expired token first (and saves it) when Epic is reachable
+        state.api_client.set_session(Some(session.clone())).await;
+        let current = state.api_client.fresh_session().await?;
 
-        if is_valid {
-            state.api_client.set_session(Some(session.clone())).await;
-            return Ok(Some(UserProfile {
-                account_id: session.account_id,
-                display_name: session.display_name.unwrap_or_else(|| "User".to_string()),
-                email: None,
-                country: None,
-                logged_in: true,
-            }));
+        match state.api_client.verify_session(&current.access_token).await {
+            Ok(true) => {
+                return Ok(Some(UserProfile {
+                    account_id: current.account_id,
+                    display_name: current.display_name.unwrap_or_else(|| "User".to_string()),
+                    email: None,
+                    country: None,
+                    logged_in: true,
+                }));
+            }
+            // Offline or Epic unreachable: that says nothing about the session.
+            // Keep it — the cached library and offline launches still work, and
+            // the token is renewed on the first Epic call that gets through.
+            // This used to sign the user out on every offline start.
+            Err(e) => {
+                warn!("Could not reach Epic to check the saved session ({}); keeping it", e);
+                return Ok(Some(UserProfile {
+                    account_id: current.account_id,
+                    display_name: current.display_name.unwrap_or_else(|| "User".to_string()),
+                    email: None,
+                    country: None,
+                    logged_in: true,
+                }));
+            }
+            Ok(false) => {}
         }
 
-        // Try refresh token if available
+        // Rejected although not expired by the clock: try the refresh token once
+        state.api_client.set_session(None).await;
         if let Some(ref rt) = session.refresh_token {
             info!("Access token expired, attempting token refresh");
             if let Ok(new_session) = state.api_client.refresh_session(rt).await {
@@ -965,9 +980,10 @@ pub async fn catalog_get_games(
     load_catalog(&state, force_refresh).await
 }
 
-/// Builds the launcher library: cached Epic catalog first, then installed titles
-/// and the Steam library. Shared by the UI command and the startup bootstrap so
-/// the first screen and the library cannot disagree.
+/// Builds the launcher library: the Epic catalog cache (refreshed live first
+/// when asked, or when there is none yet), every title installed on this PC,
+/// then the Steam library. Shared by the UI command and the startup bootstrap
+/// so the first screen and the library cannot disagree.
 async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameItem>> {
     let settings = state.storage.get_settings()?;
     let installed_games = state.storage.get_all_installed_games()?;
@@ -976,248 +992,50 @@ async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameI
         .map(|g| (g.app_name.clone(), g))
         .collect();
 
-    let session = state.api_client.get_session().await;
+    let signed_in = state.api_client.get_session().await.is_some();
+    let cache_empty = state
+        .storage
+        .get_cached_catalog_items()?
+        .iter()
+        .all(|item| is_steam_catalog_row(&item.namespace, &item.app_name));
 
-    // Read the cache before anything network-bound: it is the only source that
-    // still works when the session is gone, expired, or the machine is offline.
-    // Returning only installed games whenever there was no session is exactly
-    // what made a populated library look empty.
-    let cached = state.storage.get_cached_catalog_items()?;
-    // Serve the cache unless a live refresh was asked for *and* we could actually
-    // perform one; logged out there is nothing to refresh from, so the cache is
-    // the library.
-    if !cached.is_empty() && (!force_refresh || session.is_none()) {
-        let mut items = Vec::new();
-        for item in cached {
-            let app_name = item.app_name;
-            let title = item.title;
-            let namespace = item.namespace;
-            let catalog_item_id = item.catalog_item_id;
-
-            // The Steam metadata fetcher caches its rows in the same catalog
-            // table. They are added below by the Steam resolver (with the right
-            // platform, artwork and install state), so emitting them here would
-            // duplicate every Steam title as an "Epic" card.
-            if namespace == "steam"
-                || namespace == "steam_ignored"
-                || app_name.starts_with("steam_")
-            {
-                continue;
-            }
-
-            let metadata: Option<crate::models::GameMetadata> =
-                serde_json::from_str(&item.json_data).ok();
-            let mut icon_url = None;
-            let mut banner_url = None;
-            let mut logo_url = None;
-            let mut desc = None;
-            let mut dev = None;
-            let mut publ = None;
-
-            if let Some(m) = metadata {
-                desc = m.description;
-                dev = m.developer;
-                publ = m.publisher;
-                if let Some(images) = m.key_images {
-                    for img in images {
-                        match img.image_type.as_str() {
-                            "DieselGameBox" | "Thumbnail" | "BoxArt" => icon_url = Some(img.url),
-                            "DieselGameBoxTall" | "OfferImageTall" => {
-                                if icon_url.is_none() {
-                                    icon_url = Some(img.url);
-                                }
-                            }
-                            "DieselGameBoxWide" | "OfferImageWide" => banner_url = Some(img.url),
-                            "Logo" => logo_url = Some(img.url),
-                            _ => {}
-                        }
-                    }
+    if signed_in && (force_refresh || cache_empty) {
+        // One live fetch at a time: a second caller waits for the running one
+        // and then reads the cache it just filled.
+        match state.catalog_refresh.try_lock() {
+            Ok(_running) => {
+                if let Err(e) = refresh_epic_catalog(state, &settings.platform).await {
+                    // The cache is still the library: falling back to installed
+                    // titles only is what made a refresh "lose" games.
+                    warn!("Live Epic catalog refresh failed ({}); showing the cached library", e);
                 }
             }
-
-            let is_installed = installed_map.contains_key(&app_name);
-            let ig = installed_map.get(&app_name);
-
-            items.push(GameItem {
-                app_name: app_name.clone(),
-                title,
-                namespace,
-                catalog_item_id,
-                description: desc,
-                developer: dev,
-                publisher: publ,
-                icon_url,
-                banner_url,
-                logo_url,
-                is_installed,
-                is_dlc: ig.map(|g| g.is_dlc).unwrap_or(false),
-                build_version: ig.map(|g| g.version.clone()),
-                install_path: ig.map(|g| g.install_path.clone()),
-                install_size: ig.map(|g| g.install_size),
-                executable: ig.map(|g| g.executable.clone()),
-                can_run_offline: ig.map(|g| g.can_run_offline).unwrap_or(true),
-                supports_cloud_saves: true,
-                platform: "epic".to_string(),
-                steam_app_id: None,
-            });
-        }
-        items.extend(local_steam_library(&state, &settings, force_refresh).await);
-
-        // Merge any installed Steam games from database that weren't detected via Steam client
-        for (app_name, ig) in &installed_map {
-            if (ig.platform == "steam" || app_name.starts_with("steam_"))
-                && !items.iter().any(|item| &item.app_name == app_name)
-            {
-                let app_id = app_name.strip_prefix("steam_").and_then(|s| s.parse::<u32>().ok());
-                items.push(GameItem {
-                    app_name: app_name.clone(),
-                    title: ig.title.clone(),
-                    namespace: "steam".to_string(),
-                    catalog_item_id: app_id.map(|id| id.to_string()).unwrap_or_default(),
-                    description: Some("Steam Game installed via Hyperion".to_string()),
-                    developer: None,
-                    publisher: None,
-                    icon_url: app_id.map(|id| format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/library_600x900.jpg", id)),
-                    banner_url: app_id.map(|id| format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", id)),
-                    logo_url: app_id.map(|id| format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/logo.png", id)),
-                    is_installed: true,
-                    is_dlc: false,
-                    build_version: Some(ig.version.clone()),
-                    install_path: Some(ig.install_path.clone()),
-                    install_size: Some(ig.install_size),
-                    executable: Some(ig.executable.clone()),
-                    can_run_offline: true,
-                    supports_cloud_saves: false,
-                    platform: "steam".to_string(),
-                    steam_app_id: app_id,
-                });
+            Err(_) => {
+                let _waited = state.catalog_refresh.lock().await;
             }
         }
-
-        return Ok(dedupe_games(items));
     }
 
-    // Nothing cached and nobody signed in: show what is installed on this PC.
-    if session.is_none() {
-        let mut items = installed_game_items(&installed_map);
-        items.extend(local_steam_library(&state, &settings, force_refresh).await);
-        return Ok(dedupe_games(items));
+    let mut items = cached_epic_items(state, &installed_map)?;
+
+    // Installed titles the Epic catalog does not list — custom-manifest
+    // installs such as the featured Dauntless build, or a game the account no
+    // longer shows — used to vanish from the library after every refresh.
+    for item in installed_game_items(&installed_map) {
+        if !items.iter().any(|existing| existing.app_name == item.app_name) {
+            items.push(item);
+        }
     }
 
-    // Fetch real assets from Epic Games API
-    info!("Fetching live catalog assets from Epic Games Store API...");
-    let assets = match state.api_client.get_game_assets(&settings.platform).await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!(
-                "Failed to fetch live assets: {}. Falling back to the installed library.",
-                e
-            );
-            // Previously this returned the Steam library alone, so an expired
-            // token blanked every installed Epic title too.
-            let mut fallback_items = installed_game_items(&installed_map);
-            fallback_items.extend(local_steam_library(&state, &settings, false).await);
-            return Ok(dedupe_games(fallback_items));
-        }
-    };
-
-    let mut game_items = Vec::new();
-
-    for asset in assets {
-        if asset.namespace == "ue" {
-            continue; // Skip Unreal Engine engine components
-        }
-
-        let metadata = state
-            .api_client
-            .get_catalog_item(&asset.namespace, &asset.catalog_item_id)
-            .await
-            .unwrap_or(None);
-
-        let title = metadata
-            .as_ref()
-            .map(|m| m.title.clone())
-            .unwrap_or_else(|| asset.app_name.clone());
-
-        let mut icon_url = None;
-        let mut banner_url = None;
-        let mut logo_url = None;
-        let mut desc = None;
-        let mut dev = None;
-        let mut publ = None;
-
-        if let Some(ref m) = metadata {
-            desc = m.description.clone();
-            dev = m.developer.clone();
-            publ = m.publisher.clone();
-            if let Some(ref images) = m.key_images {
-                for img in images {
-                    match img.image_type.as_str() {
-                        "DieselGameBox" | "Thumbnail" | "BoxArt" => {
-                            icon_url = Some(img.url.clone())
-                        }
-                        "DieselGameBoxTall" | "OfferImageTall" => {
-                            if icon_url.is_none() {
-                                icon_url = Some(img.url.clone());
-                            }
-                        }
-                        "DieselGameBoxWide" | "OfferImageWide" => {
-                            banner_url = Some(img.url.clone())
-                        }
-                        "Logo" => logo_url = Some(img.url.clone()),
-                        _ => {}
-                    }
-                }
-            }
-
-            // Cache to SQLite
-            if let Ok(json_str) = serde_json::to_string(m) {
-                let _ = state.storage.cache_catalog_item(
-                    &asset.app_name,
-                    &title,
-                    &asset.namespace,
-                    &asset.catalog_item_id,
-                    &json_str,
-                );
-            }
-        }
-
-        let is_installed = installed_map.contains_key(&asset.app_name);
-        let ig = installed_map.get(&asset.app_name);
-
-        game_items.push(GameItem {
-            app_name: asset.app_name,
-            title,
-            namespace: asset.namespace,
-            catalog_item_id: asset.catalog_item_id,
-            description: desc,
-            developer: dev,
-            publisher: publ,
-            icon_url,
-            banner_url,
-            logo_url,
-            is_installed,
-            is_dlc: ig.map(|g| g.is_dlc).unwrap_or(false),
-            build_version: Some(asset.build_version),
-            install_path: ig.map(|g| g.install_path.clone()),
-            install_size: ig.map(|g| g.install_size),
-            executable: ig.map(|g| g.executable.clone()),
-            can_run_offline: ig.map(|g| g.can_run_offline).unwrap_or(true),
-            supports_cloud_saves: true,
-            platform: "epic".to_string(),
-            steam_app_id: None,
-        });
-    }
-
-    game_items.extend(local_steam_library(&state, &settings, force_refresh).await);
+    items.extend(local_steam_library(state, &settings, force_refresh).await);
 
     // Merge any installed Steam games from database that weren't detected via Steam client
     for (app_name, ig) in &installed_map {
         if (ig.platform == "steam" || app_name.starts_with("steam_"))
-            && !game_items.iter().any(|item| &item.app_name == app_name)
+            && !items.iter().any(|item| &item.app_name == app_name)
         {
             let app_id = app_name.strip_prefix("steam_").and_then(|s| s.parse::<u32>().ok());
-            game_items.push(GameItem {
+            items.push(GameItem {
                 app_name: app_name.clone(),
                 title: ig.title.clone(),
                 namespace: "steam".to_string(),
@@ -1242,7 +1060,158 @@ async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameI
         }
     }
 
-    Ok(dedupe_games(game_items))
+    Ok(dedupe_games(items))
+}
+
+/// Rows the Steam metadata fetcher keeps in the shared catalog table.
+fn is_steam_catalog_row(namespace: &str, app_name: &str) -> bool {
+    namespace == "steam" || namespace == "steam_ignored" || app_name.starts_with("steam_")
+}
+
+/// Fetches the account's Epic titles and stores them in the catalog cache.
+///
+/// Metadata is fetched 8 titles at a time (one request after another made a
+/// large library take minutes). A title whose metadata request fails keeps its
+/// previous row — or gets a minimal one — so it cannot drop out of the library
+/// on the next start; titles no longer on the account are pruned.
+async fn refresh_epic_catalog(state: &AppState, platform: &str) -> Result<()> {
+    use futures_util::StreamExt;
+
+    info!("Fetching live catalog assets from Epic Games Store API...");
+    let assets: Vec<crate::models::GameAsset> = state
+        .api_client
+        .get_game_assets(platform)
+        .await?
+        .into_iter()
+        .filter(|asset| asset.namespace != "ue") // Unreal Engine components
+        .collect();
+
+    // Owned inputs only: a stream borrowing `assets` across the await is not
+    // `Send` for every lifetime, which Tauri's command futures require.
+    let lookups: Vec<(String, String)> = assets
+        .iter()
+        .map(|asset| (asset.namespace.clone(), asset.catalog_item_id.clone()))
+        .collect();
+    let api = state.api_client.clone();
+    let metadata: Vec<Option<crate::models::GameMetadata>> = futures_util::stream::iter(lookups)
+        .map(move |(namespace, catalog_item_id)| {
+            let api = api.clone();
+            async move {
+                api.get_catalog_item(&namespace, &catalog_item_id)
+                    .await
+                    .unwrap_or(None)
+            }
+        })
+        .buffered(8)
+        .collect()
+        .await;
+
+    for (asset, meta) in assets.iter().zip(metadata) {
+        match meta.and_then(|m| serde_json::to_string(&m).ok().map(|json| (m.title, json))) {
+            Some((title, json)) => {
+                state.storage.cache_catalog_item(
+                    &asset.app_name,
+                    &title,
+                    &asset.namespace,
+                    &asset.catalog_item_id,
+                    &json,
+                )?;
+            }
+            None => {
+                if state.storage.get_cached_catalog_item(&asset.app_name)?.is_none() {
+                    state.storage.cache_catalog_item(
+                        &asset.app_name,
+                        &asset.app_name,
+                        &asset.namespace,
+                        &asset.catalog_item_id,
+                        "{}",
+                    )?;
+                }
+            }
+        }
+    }
+
+    // An empty answer is more likely a hiccup than an account with no games
+    if !assets.is_empty() {
+        let keep: Vec<String> = assets.iter().map(|a| a.app_name.clone()).collect();
+        let removed = state.storage.prune_epic_catalog(&keep)?;
+        if removed > 0 {
+            info!("Dropped {} cached titles no longer on this Epic account", removed);
+        }
+    }
+    Ok(())
+}
+
+/// Epic library rows from the catalog cache, with install state applied.
+fn cached_epic_items(
+    state: &AppState,
+    installed_map: &std::collections::HashMap<String, InstalledGame>,
+) -> Result<Vec<GameItem>> {
+    let mut items = Vec::new();
+    for item in state.storage.get_cached_catalog_items()? {
+        // The Steam metadata fetcher caches its rows in the same catalog
+        // table. They are added by the Steam resolver (with the right
+        // platform, artwork and install state), so emitting them here would
+        // duplicate every Steam title as an "Epic" card.
+        if is_steam_catalog_row(&item.namespace, &item.app_name) {
+            continue;
+        }
+
+        let metadata: Option<crate::models::GameMetadata> =
+            serde_json::from_str(&item.json_data).ok();
+        let mut icon_url = None;
+        let mut banner_url = None;
+        let mut logo_url = None;
+        let mut desc = None;
+        let mut dev = None;
+        let mut publ = None;
+
+        if let Some(m) = metadata {
+            desc = m.description;
+            dev = m.developer;
+            publ = m.publisher;
+            if let Some(images) = m.key_images {
+                for img in images {
+                    match img.image_type.as_str() {
+                        "DieselGameBox" | "Thumbnail" | "BoxArt" => icon_url = Some(img.url),
+                        "DieselGameBoxTall" | "OfferImageTall" => {
+                            if icon_url.is_none() {
+                                icon_url = Some(img.url);
+                            }
+                        }
+                        "DieselGameBoxWide" | "OfferImageWide" => banner_url = Some(img.url),
+                        "Logo" => logo_url = Some(img.url),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let ig = installed_map.get(&item.app_name);
+        items.push(GameItem {
+            app_name: item.app_name,
+            title: item.title,
+            namespace: item.namespace,
+            catalog_item_id: item.catalog_item_id,
+            description: desc,
+            developer: dev,
+            publisher: publ,
+            icon_url,
+            banner_url,
+            logo_url,
+            is_installed: ig.is_some(),
+            is_dlc: ig.map(|g| g.is_dlc).unwrap_or(false),
+            build_version: ig.map(|g| g.version.clone()),
+            install_path: ig.map(|g| g.install_path.clone()),
+            install_size: ig.map(|g| g.install_size),
+            executable: ig.map(|g| g.executable.clone()),
+            can_run_offline: ig.map(|g| g.can_run_offline).unwrap_or(true),
+            supports_cloud_saves: true,
+            platform: "epic".to_string(),
+            steam_app_id: None,
+        });
+    }
+    Ok(items)
 }
 
 #[tauri::command]
@@ -1457,7 +1426,7 @@ pub async fn game_install(
             manifest,
             manifest_bytes,
             base_url,
-            state.api_client.get_session().await.map(|s| s.access_token),
+            state.api_client.fresh_session().await.ok().map(|s| s.access_token),
             target_dir,
             settings.max_workers,
             Some(installed),
@@ -1733,7 +1702,7 @@ async fn inspect_manifest(
         }
     }
 
-    let epic_token = state.api_client.get_session().await.map(|s| s.access_token);
+    let epic_token = state.api_client.fresh_session().await.ok().map(|s| s.access_token);
     let final_base_url = pick_chunk_base(
         state,
         &manifest,
@@ -1898,7 +1867,7 @@ pub async fn game_install_custom_manifest(
     // Mirrors frequently host only the `.manifest` file while the actual game
     // data still lives on Epic's servers, so gather candidates and keep the
     // first one that really serves this build's chunks.
-    let epic_token = state.api_client.get_session().await.map(|s| s.access_token);
+    let epic_token = state.api_client.fresh_session().await.ok().map(|s| s.access_token);
     let explicit_base = request
         .base_url
         .as_deref()
@@ -2131,7 +2100,7 @@ pub async fn game_repair(
             manifest,
             manifest_bytes,
             base_url,
-            state.api_client.get_session().await.map(|s| s.access_token),
+            state.api_client.fresh_session().await.ok().map(|s| s.access_token),
             install_dir,
             settings.max_workers,
             Some(installed),
@@ -2343,7 +2312,7 @@ pub async fn game_launch(
         .map(|g| g.namespace)
         .unwrap_or_else(|| "default".to_string());
 
-    let session = state.api_client.get_session().await;
+    let session = state.api_client.fresh_session().await.ok();
     let settings = state.storage.get_settings()?;
 
     let pid = Launcher::launch_game(

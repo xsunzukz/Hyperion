@@ -96,11 +96,28 @@ pub struct ExchangeCodeResponse {
     pub expires_in_seconds: Option<i64>,
 }
 
+type SessionSink = Box<dyn Fn(&Session) + Send + Sync>;
+
+/// Renew the access token when less than this much of it is left.
+const REFRESH_MARGIN_SECS: i64 = 300;
+
+/// True when the session's access token expires within the margin. A session
+/// without a readable expiry is left alone rather than refreshed on every call.
+pub fn needs_refresh(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
+    session
+        .expires_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| at.with_timezone(&chrono::Utc) - now < chrono::Duration::seconds(REFRESH_MARGIN_SECS))
+}
+
 pub struct EpicApiClient {
     client: Client,
     session: Arc<RwLock<Option<Session>>>,
     client_id: String,
     client_secret: String,
+    refresh_lock: tokio::sync::Mutex<()>,
+    session_sink: std::sync::RwLock<Option<SessionSink>>,
 }
 
 impl Default for EpicApiClient {
@@ -125,6 +142,8 @@ impl EpicApiClient {
             session: Arc::new(RwLock::new(None)),
             client_id: DEFAULT_CLIENT_ID.to_string(),
             client_secret: DEFAULT_CLIENT_SECRET.to_string(),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            session_sink: std::sync::RwLock::new(None),
         }
     }
 
@@ -251,11 +270,53 @@ impl EpicApiClient {
     }
 
     async fn get_auth_token(&self) -> Result<String> {
-        let s = self.session.read().await;
-        if let Some(ref session) = *s {
-            Ok(session.access_token.clone())
-        } else {
-            Err(AppError::Auth("User is not logged in".to_string()))
+        Ok(self.fresh_session().await?.access_token)
+    }
+
+    /// The signed-in session, renewed first when its access token is about to
+    /// expire.
+    ///
+    /// Hyperion lives in the tray for days, but the token used to be renewed
+    /// only at startup, so every Epic call (library refresh, installs, launch)
+    /// started failing a few hours in. Concurrent callers share one refresh. A
+    /// failed refresh hands back the old session and the call reports Epic's
+    /// own error.
+    pub async fn fresh_session(&self) -> Result<Session> {
+        let not_signed_in = || AppError::Auth("User is not logged in".to_string());
+        let current = self.get_session().await.ok_or_else(not_signed_in)?;
+        if !needs_refresh(&current, chrono::Utc::now()) {
+            return Ok(current);
+        }
+
+        let _guard = self.refresh_lock.lock().await;
+        // Someone else may have renewed it while this call waited
+        let current = self.get_session().await.ok_or_else(not_signed_in)?;
+        if !needs_refresh(&current, chrono::Utc::now()) {
+            return Ok(current);
+        }
+        let Some(refresh_token) = current.refresh_token.clone() else {
+            return Ok(current);
+        };
+
+        match self.refresh_session(&refresh_token).await {
+            Ok(renewed) => {
+                info!("Renewed the Epic session before it expired");
+                if let Some(sink) = self.session_sink.read().ok().as_deref().and_then(Option::as_ref) {
+                    sink(&renewed);
+                }
+                Ok(renewed)
+            }
+            Err(e) => {
+                warn!("Could not renew the Epic session: {}", e);
+                Ok(current)
+            }
+        }
+    }
+
+    /// Called with every renewed session, so the stored copy stays current.
+    pub fn set_session_sink(&self, sink: impl Fn(&Session) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.session_sink.write() {
+            *slot = Some(Box::new(sink));
         }
     }
 
@@ -290,12 +351,8 @@ impl EpicApiClient {
 
     pub async fn get_user_entitlements(&self) -> Result<Vec<serde_json::Value>> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let mut all_entitlements = Vec::new();
@@ -533,12 +590,8 @@ impl EpicApiClient {
         catalog_item_id: &str,
     ) -> Result<Vec<u8>> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let url = format!(
@@ -568,12 +621,8 @@ impl EpicApiClient {
 
     pub async fn get_cloud_save_manifests(&self, app_name: &str) -> Result<serde_json::Value> {
         let (token, account_id) = {
-            let s = self.session.read().await;
-            if let Some(ref session) = *s {
-                (session.access_token.clone(), session.account_id.clone())
-            } else {
-                return Err(AppError::Auth("Not logged in".to_string()));
-            }
+            let session = self.fresh_session().await?;
+            (session.access_token, session.account_id)
         };
 
         let url = format!(
@@ -603,6 +652,33 @@ impl EpicApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_expiring_at(expires_at: Option<&str>) -> Session {
+        serde_json::from_value(serde_json::json!({
+            "access_token": "a",
+            "expires_in": 7200,
+            "expires_at": expires_at,
+            "token_type": "bearer",
+            "refresh_token": "r",
+            "account_id": "acc",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn sessions_renew_shortly_before_they_expire() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        assert!(!needs_refresh(&session_expiring_at(Some("2026-10-25T14:00:00.000Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T12:04:00.000Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T08:00:00Z")), now));
+        assert!(needs_refresh(&session_expiring_at(Some("2026-10-25T17:31:00+05:30")), now));
+        // Unknown expiry: leave it alone instead of refreshing on every call
+        assert!(!needs_refresh(&session_expiring_at(None), now));
+        assert!(!needs_refresh(&session_expiring_at(Some("garbage")), now));
+    }
 
     #[test]
     fn token_goes_to_epic_hosts_only() {
