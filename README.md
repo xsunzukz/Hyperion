@@ -220,6 +220,10 @@ If no candidate serves the build, the error names the base that was tried and po
   local state (`*.db`, `.env*`, `reference/`) are ignored — see `.gitignore`.
 - Line endings are normalised to LF via `.gitattributes`; binary assets stay untouched.
 - Licence: GNU GPL v3.0 or later — see [LICENSE](LICENSE).
+- Branding: `public/logo_clean.png` is the source artwork. `scripts/build_logo.py` derives the
+  transparent, cropped `public/hyperion logo.png` used by the UI, and `scripts/build_icons.py`
+  regenerates the Tauri icons in `src-tauri/icons` from it. Replace `logo_clean.png` and rerun
+  both scripts after an artwork change.
 
 ### Pushing to a new remote
 
