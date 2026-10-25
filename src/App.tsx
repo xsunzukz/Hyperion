@@ -36,7 +36,6 @@ import {
   gameStop,
   gameUninstall,
   listenToDownloadProgress,
-  manifestPrefetch,
   settingsGet,
   settingsSave,
   steamClearCredentials,
@@ -188,18 +187,6 @@ export const App: React.FC = () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
-
-  // Every launch: refresh the featured build's manifest and keep the local copy,
-  // so the INSTALL button loads it from disk and a republished build is picked up.
-  useEffect(() => {
-    manifestPrefetch(SPONSOR_MANIFEST_URL)
-      .then((info) => {
-        console.info(
-          `Dauntless manifest refreshed locally${info?.build_version ? ` (build ${info.build_version})` : ''}`
-        );
-      })
-      .catch((e) => console.warn('Dauntless manifest prefetch failed:', e));
   }, []);
 
   // Surface the opt-in when Steam is connected but its library is not scanned,
@@ -422,7 +409,7 @@ export const App: React.FC = () => {
           data.username || '',
           data.password || '',
           data.guardCode,
-          data.remember ?? true
+          data.remember ?? false
         );
       } catch (e: any) {
         // Surface Valve's reason without the Tauri error prefix
@@ -436,14 +423,15 @@ export const App: React.FC = () => {
     setSteamAuthRequest(null);
     setSteamAuthVersion((v) => v + 1);
 
-    // The backend turns on the Steam library scan on sign-in, so refresh the
-    // catalog to pull the Steam titles into the library right away.
+    // Refresh the catalog: titles installed through the engine show up now.
+    // This PC's Steam library is listed only once the user enables that scan
+    // (the Library banner offers it).
     loadGames(false);
 
     // Authorisation-only flow (no pending game): nothing to install
     if (!request.appName) {
       showNotification(
-        'Steam connected — your Steam library is being added',
+        'Steam connected — Steam downloads now run in Hyperion',
         'success'
       );
       return;

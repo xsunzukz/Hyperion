@@ -21,6 +21,21 @@ pub const CATALOG_HOST: &str = "catalog-public-service-prod06.ol.epicgames.com";
 pub const ECOMMERCE_HOST: &str = "ecommerceintegration-public-service-ecomprod02.ol.epicgames.com";
 pub const DATASTORAGE_HOST: &str = "datastorage-public-service-liveegs.live.use1a.on.epicgames.com";
 
+/// User agent for requests to anyone other than Epic.
+pub const HONEST_USER_AGENT: &str = concat!("Hyperion/", env!("CARGO_PKG_VERSION"));
+
+/// Epic's download CDNs (manifests and chunks), which see the launcher UA.
+fn is_epic_cdn_host(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| {
+            host.ends_with(".akamaized.net")
+                || host.ends_with(".fastly-edge.com")
+                || host.ends_with(".epicgamescdn.com")
+        })
+}
+
 /// True only for Epic's own hosts, the one place the account token may go.
 ///
 /// Matched on the parsed host: a substring test on the whole URL handed the
@@ -548,7 +563,13 @@ impl EpicApiClient {
 
     pub async fn download_manifest_bytes(&self, uri: &str) -> Result<Vec<u8>> {
         debug!("Downloading manifest binary from: {}", uri);
-        let resp = self.client.get(uri).send().await?;
+        let mut request = self.client.get(uri);
+        // The Epic launcher user agent is for Epic. Community mirrors get an
+        // honest one rather than a client pretending to be Epic's launcher.
+        if !is_epic_host(uri) && !is_epic_cdn_host(uri) {
+            request = request.header(USER_AGENT, HONEST_USER_AGENT);
+        }
+        let resp = request.send().await?;
         if !resp.status().is_success() {
             return Err(AppError::Network(format!(
                 "Failed to download manifest from {}: status {}",

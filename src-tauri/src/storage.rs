@@ -82,6 +82,10 @@ impl Storage {
             "#,
         )?;
 
+        // Older builds kept a captured Steam web-login cookie here; that
+        // sign-in path is gone, so the cookie must not linger on disk.
+        conn.execute("DELETE FROM settings WHERE key = 'steam_token'", [])?;
+
         debug!("Database schema initialized successfully");
         Ok(())
     }
@@ -317,7 +321,6 @@ impl Storage {
                 "platform" => settings.platform = val,
                 "steam_account" => settings.steam_account = if val.is_empty() { None } else { Some(val) },
                 "steam_id" => settings.steam_id = if val.is_empty() { None } else { Some(val) },
-                "steam_token" => settings.steam_token = if val.is_empty() { None } else { Some(val) },
                 "steam_password_enc" => {
                     settings.steam_password_enc = if val.is_empty() { None } else { Some(val) }
                 }
@@ -341,7 +344,6 @@ impl Storage {
             ("platform", settings.platform.clone()),
             ("steam_account", settings.steam_account.clone().unwrap_or_default()),
             ("steam_id", settings.steam_id.clone().unwrap_or_default()),
-            ("steam_token", settings.steam_token.clone().unwrap_or_default()),
             (
                 "steam_password_enc",
                 settings.steam_password_enc.clone().unwrap_or_default(),

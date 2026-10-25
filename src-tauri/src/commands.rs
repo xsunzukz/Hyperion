@@ -159,7 +159,7 @@ pub async fn auth_start_automatic_login(
         if nav_url.host_str() == Some("hyperion-auth-callback.local") {
             for (k, v) in nav_url.query_pairs() {
                 if k == "code" && v.len() >= 20 {
-                    info!("Captured OAuth code directly from webview intercept: {}", &v);
+                    info!("Captured the OAuth code from the webview intercept ({} chars)", v.len());
                     let _ = tx_clone.send(v.to_string());
                     break;
                 }
@@ -171,7 +171,7 @@ pub async fn auth_start_automatic_login(
         if let Some(_query) = nav_url.query() {
             for (k, v) in nav_url.query_pairs() {
                 if (k == "code" || k == "authorizationCode") && v.len() >= 20 {
-                    info!("Captured OAuth code via query parameter: {}", &v);
+                    info!("Captured the OAuth code from the query string ({} chars)", v.len());
                     let _ = tx_clone.send(v.to_string());
                     return false;
                 }
@@ -223,7 +223,7 @@ pub async fn auth_start_automatic_login(
                 if let Some(code) = title.strip_prefix("AUTH_SUCCESS:") {
                     let code = code.trim().to_string();
                     if code.len() >= 20 {
-                        info!("Captured OAuth code via window title: {}", &code);
+                        info!("Captured the OAuth code from the window title ({} chars)", code.len());
                         final_code = Some(code);
                         break;
                     }
@@ -284,183 +284,16 @@ pub async fn auth_cancel_automatic_login(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-const STEAM_AUTH_INJECTION_SCRIPT: &str = r#"
-(function() {
-  var handled = false;
-  function checkSteamLogin() {
-    if (handled) return;
-    try {
-      var cookies = document.cookie || '';
-      var m = cookies.match(/steamLoginSecure=([0-9]+)%7C%7C([^;]+)/);
-      if (!m) {
-        m = cookies.match(/steamLoginSecure=([^;]+)/);
-      }
-
-      var steamId = '';
-      if (m && m[1]) {
-        steamId = m[1];
-      } else if (window.g_steamID && window.g_steamID !== '0') {
-        steamId = String(window.g_steamID);
-      }
-
-      var accountName = '';
-      var userElem = document.querySelector('.persona') || document.querySelector('#account_pulldown') || document.querySelector('.user_avatar');
-      if (userElem && userElem.textContent) {
-        accountName = userElem.textContent.trim();
-      }
-
-      if (m || (steamId && !window.location.href.includes('/login'))) {
-        handled = true;
-        var token = m ? m[0] : ('steamLoginSecure=' + steamId);
-
-        try {
-          if (document.body) {
-            document.body.innerHTML = `
-              <div style="position:fixed;inset:0;background:#09090b;color:#f4f4f5;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;z-index:9999999;">
-                <div style="width:44px;height:44px;border:3px solid #0ea5e9;border-top-color:transparent;border-radius:50%;animation:hyperion-spin 0.8s linear infinite;margin-bottom:18px;"></div>
-                <style>@keyframes hyperion-spin{to{transform:rotate(360deg)}}</style>
-                <h2 style="font-size:20px;font-weight:700;margin:0 0 8px;color:#38bdf8;">Steam Sign In Complete</h2>
-                <p style="font-size:13px;color:#a1a1aa;margin:0;">Connecting your Steam account to Hyperion...</p>
-              </div>
-            `;
-          }
-        } catch(e) {}
-
-        window.location.href = 'https://hyperion-steam-callback.local/?token=' + encodeURIComponent(token) + '&steamid=' + encodeURIComponent(steamId) + '&account=' + encodeURIComponent(accountName);
-      }
-    } catch(err) {}
-  }
-
-  setInterval(checkSteamLogin, 400);
-  document.addEventListener('DOMContentLoaded', checkSteamLogin);
-  window.addEventListener('load', checkSteamLogin);
-})();
-"#;
-
+/// Sets up Valve's SteamCMD engine ahead of the first Steam sign-in.
+///
+/// Called when the Steam sign-in dialog opens, so the one-time ~30 MB engine
+/// download runs while the user types instead of on every first launch.
 #[tauri::command]
-pub async fn steam_start_automatic_login(
-    app: AppHandle,
-    state: State<'_, Arc<AppState>>,
-) -> Result<()> {
-    if let Some(existing) = app.get_webview_window("steam_auth") {
-        let _ = existing.close();
-    }
-
-    let login_url = url::Url::parse("https://store.steampowered.com/login/")
-        .map_err(|e| AppError::Auth(format!("Invalid Steam login URL: {}", e)))?;
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, String)>();
-    let tx_clone = tx.clone();
-
-    let builder = WebviewWindowBuilder::new(
-        &app,
-        "steam_auth",
-        WebviewUrl::External(login_url),
-    )
-    .title("Sign In with Steam - Official Valve Web Login")
-    .inner_size(520.0, 720.0)
-    .center()
-    .resizable(false)
-    .initialization_script(STEAM_AUTH_INJECTION_SCRIPT)
-    .on_navigation(move |nav_url: &url::Url| {
-        if nav_url.host_str() == Some("hyperion-steam-callback.local") {
-            let mut token = String::new();
-            let mut steam_id = String::new();
-            let mut account = String::new();
-
-            for (k, v) in nav_url.query_pairs() {
-                if k == "token" { token = v.to_string(); }
-                if k == "steamid" { steam_id = v.to_string(); }
-                if k == "account" { account = v.to_string(); }
-            }
-
-            info!("Captured Steam webview token! SteamID: {}", steam_id);
-            let _ = tx_clone.send((token, steam_id, account));
-            return false;
-        }
-        true
-    });
-
-    builder
-        .build()
-        .map_err(|e| AppError::Auth(format!("Failed to open Steam sign-in window: {}", e)))?;
-
-    let app_handle = app.clone();
-    let state_arc = Arc::clone(&state);
-
-    tokio::spawn(async move {
-        let mut rx = rx;
-        let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(300);
-
-        loop {
-            if start_time.elapsed() > timeout {
-                warn!("Steam authentication timed out after 5 minutes");
-                let _ = app_handle.emit("steam-login-failed", "Steam sign-in timed out. Please try again.");
-                break;
-            }
-
-            let win = match app_handle.get_webview_window("steam_auth") {
-                Some(w) => w,
-                None => {
-                    info!("Steam sign-in window closed by user");
-                    break;
-                }
-            };
-
-            if let Ok((token, steam_id, account)) = rx.try_recv() {
-                let mut settings = match state_arc.storage.get_settings() {
-                    Ok(s) => s,
-                    Err(_) => AppSettings::default(),
-                };
-
-                let effective_account = if !account.is_empty() {
-                    Some(account)
-                } else {
-                    settings.steam_account
-                };
-
-                let effective_steam_id = if !steam_id.is_empty() {
-                    Some(steam_id)
-                } else {
-                    settings.steam_id
-                };
-
-                settings.steam_token = Some(token);
-                settings.steam_account = effective_account.clone();
-                settings.steam_id = effective_steam_id.clone();
-
-                if let Err(e) = state_arc.storage.save_settings(&settings) {
-                    warn!("Failed to save Steam token credentials to storage: {}", e);
-                }
-
-                let status = SteamAuthStatus {
-                    logged_in: true,
-                    account_name: effective_account,
-                    steam_id: effective_steam_id,
-                };
-
-                let _ = app_handle.emit("steam-login-success", &status);
-                info!("Steam token-based sign-in succeeded!");
-
-                let _ = win.close();
-                break;
-            }
-
-            poll_interval.tick().await;
-        }
-    });
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn steam_cancel_automatic_login(app: AppHandle) -> Result<()> {
-    if let Some(win) = app.get_webview_window("steam_auth") {
-        let _ = win.close();
-    }
-    Ok(())
+pub async fn steam_prepare_engine() -> Result<()> {
+    crate::steam::downloader::SteamDownloadManager::ensure_steamcmd()
+        .await
+        .map(|_| ())
+        .map_err(AppError::Install)
 }
 
 #[tauri::command]
@@ -472,7 +305,7 @@ pub async fn steam_get_auth_status(state: State<'_, Arc<AppState>>) -> Result<St
 
     let account_name = settings.steam_account.clone();
     let steam_id = settings.steam_id.clone();
-    let logged_in = settings.steam_token.is_some() || account_name.is_some();
+    let logged_in = account_name.is_some();
 
     Ok(SteamAuthStatus {
         logged_in,
@@ -490,7 +323,6 @@ async fn clear_steam_session(state: &AppState) -> Result<()> {
     crate::secret::forget(&state.storage)?;
 
     let mut settings = state.storage.get_settings()?;
-    settings.steam_token = None;
     settings.steam_account = None;
     settings.steam_id = None;
     state.storage.save_settings(&settings)?;
@@ -597,15 +429,11 @@ pub async fn steam_set_credentials(
     }
 
     // Remember which account signed in, so later runs can show it without ever
-    // opening Steam's own account files. Signing in also turns on the local
-    // library scan: the whole point of connecting is seeing the Steam games, and
-    // it stays switchable from Settings.
+    // opening Steam's own account files. The local library scan stays off until
+    // the user turns it on (Library banner or Settings): switching it on here
+    // made signing in start reading Steam's `userdata` behind the user's back.
     if let Ok(mut settings) = state.storage.get_settings() {
         settings.steam_account = Some(username.clone());
-        if !settings.steam_library_scan {
-            settings.steam_library_scan = true;
-            info!("Enabled the Steam library scan after a successful sign-in");
-        }
         if let Err(e) = state.storage.save_settings(&settings) {
             warn!("Could not persist the Steam account name: {}", e);
         }
@@ -901,39 +729,13 @@ pub async fn app_bootstrap(
         false,
     );
 
-    let mut steamcmd_ready = crate::steam::downloader::SteamDownloadManager::steamcmd_installed();
-
-    if first_run && !steamcmd_ready {
-        // Deliberately vague: the splash should not narrate which engine is being
-        // fetched or where it comes from. The real reason stays in the log.
-        emit(
-            "steamcmd",
-            "Setting this up",
-            Some("Preparing the download engine".to_string()),
-            None,
-            false,
-        );
-
-        match crate::steam::downloader::SteamDownloadManager::ensure_steamcmd().await {
-            Ok(_) => {
-                steamcmd_ready = true;
-                emit("steamcmd", "Setting this up", None, Some(100.0), true);
-            }
-            Err(e) => {
-                // Not fatal: Epic downloads keep working, Steam installs retry later.
-                warn!("SteamCMD install failed during bootstrap: {}", e);
-                emit(
-                    "steamcmd",
-                    "Setting this up",
-                    Some("Skipped for now — it will retry when needed".to_string()),
-                    Some(100.0),
-                    true,
-                );
-            }
-        }
-    } else {
-        emit("steamcmd", "Setting this up", None, Some(100.0), true);
-    }
+    // SteamCMD is no longer fetched here. An unsigned app that downloads,
+    // unpacks and silently runs an executable within seconds of its first start
+    // is the textbook dropper pattern behaviour engines convict on (and most
+    // users never download from Steam at all). The engine is set up when Steam
+    // is first used: the sign-in dialog prepares it while the user types.
+    let steamcmd_ready = crate::steam::downloader::SteamDownloadManager::steamcmd_installed();
+    emit("steamcmd", "Setting this up", None, Some(100.0), true);
 
     emit(
         "library",
@@ -2720,9 +2522,33 @@ pub async fn diagnostics_get(state: State<'_, Arc<AppState>>) -> Result<SystemDi
     })
 }
 
+/// Opens a folder/file in Explorer or an http(s) link in the browser.
+///
+/// The webview may only open what the UI actually shows — install and save
+/// folders, Epic's sign-in page — not run arbitrary programs or other URL
+/// schemes. ShellExecute is used directly; `open::that` went through a hidden
+/// PowerShell child process.
 #[tauri::command]
 pub async fn open_path(path: String) -> Result<()> {
-    open::that(path).map_err(|e| AppError::Io(e.to_string()))
+    let target = path.trim();
+    let is_web = url::Url::parse(target)
+        .map(|u| u.scheme() == "https" || u.scheme() == "http")
+        .unwrap_or(false);
+    if !is_web {
+        let meta = std::fs::metadata(target)
+            .map_err(|e| AppError::Io(format!("Cannot open {}: {}", target, e)))?;
+        let is_program = std::path::Path::new(target)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ["exe", "bat", "cmd", "com", "ps1", "vbs", "js", "msi", "lnk", "scr"]
+                    .contains(&ext.to_ascii_lowercase().as_str())
+            });
+        if !meta.is_dir() && is_program {
+            return Err(AppError::Io(format!("Refusing to run {} from the UI", target)));
+        }
+    }
+    open::that_detached(target).map_err(|e| AppError::Io(e.to_string()))
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ Binary manifests, parallel chunk streams and SHA-1 verification — no Python ru
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?style=for-the-badge&logo=tauri&logoColor=white&labelColor=0a0a0b)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=0a0a0b&labelColor=0a0a0b)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=0a0a0b)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-43%20passing-2ea043?style=for-the-badge&labelColor=0a0a0b)](#build--run)
+[![Tests](https://img.shields.io/badge/tests-62%20passing-2ea043?style=for-the-badge&labelColor=0a0a0b)](#build--run)
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-8b5cf6?style=for-the-badge&labelColor=0a0a0b)](LICENSE)
 
 [**Features**](#features) · [**Why it's fast**](#why-it-downloads-fast) · [**Steam**](#steam-integration) · [**Build**](#build--run) · [**Security**](#security--antivirus) · [**Credits**](#credits)
@@ -45,10 +45,11 @@ It exists because the interesting part of a launcher is the download pipeline, a
 - Streaming zlib inflate and AES-256-GCM decryption
 - Decode and disk writes pushed to the blocking pool, so the network never stalls behind the CPU
 - Manual HTTP/TLS via `reqwest` + `rustls`
-- Resume journal (`.hyperion_resume.txt`) that survives a cancelled or crashed run
-- Streaming SHA-1 integrity verification — no archive is ever held in memory in full
+- Resume journal (`.hyperion_resume.txt`) written per finished file and checked by hash, so a crash resumes and an update only fetches changed files
+- Every chunk is checked against the manifest's SHA-1 before it is written, and bad chunks are refetched
+- Verify hashes the install against the exact manifest it came from, and Repair re-downloads only the files that fail
 - CDN resolution: cached catalog → Epic assets API → manifest-relative, each candidate probed with a range request
-- Community manifests refreshed into a local cache on every launch — INSTALL loads the cached file, and an offline launch falls back to the last copy
+- Community manifests are fetched when you open them and kept in a local cache, so an offline install falls back to the last copy
 
 </td>
 <td width="50%" valign="top">
@@ -63,7 +64,7 @@ It exists because the interesting part of a launcher is the download pipeline, a
 - Library scan for Steam titles via `libraryfolders.vdf` / `appmanifest_*.acf`
 - Local state in SQLite — no account database in the cloud
 - Single instance: launching the app again raises the running window instead of starting a second copy
-- Staged startup splash: runtime files → SteamCMD (first run only) → Epic + Steam library, with real per-stage progress and a "continue anyway" escape hatch
+- Staged startup splash: runtime files → Epic + Steam library, with real per-stage progress and a "continue anyway" escape hatch
 - Sign-in gate after startup, with **Epic sign-in as the primary path** (Epic's own login page handles the password); a one-session offline skip keeps installed games playable
 
 </td>
@@ -131,7 +132,7 @@ hyperion/
 
 Installed Steam titles are discovered from `libraryfolders.vdf` and `appmanifest_*.acf`, with metadata straight from Valve's public APIs (no key needed).
 
-Steam *downloads* run inside Hyperion — no Steam client window, no Steam library involvement — by driving Valve's headless `SteamCMD`, fetched once into `%LOCALAPPDATA%/Hyperion/steamcmd`, with speed, byte progress, ETA and validation streamed into the Downloads queue. Valve's archive is only a ~1.6 MB bootstrapper, so it is run once (`+quit`) to fetch the real engine before the first sign-in — otherwise that ~30 MB download happens inside the Steam Guard window and the login times out.
+Steam *downloads* run inside Hyperion — no Steam client window, no Steam library involvement — by driving Valve's headless `SteamCMD`, fetched into `%LOCALAPPDATA%/Hyperion/steamcmd` the first time you use Steam, with speed, byte progress, ETA and validation streamed into the Downloads queue. Valve's archive is only a ~1.6 MB bootstrapper, so the Steam sign-in dialog runs it once (`+quit`) to fetch the real engine while you type — otherwise that ~30 MB download happens inside the Steam Guard window and the login times out.
 
 Valve only issues depot licences to an authenticated session, so a sign-in is required before the first download:
 
@@ -149,7 +150,7 @@ Unlike the Epic path, this one deliberately delegates to Valve's tool: a from-sc
 
 ```bash
 npm install                 # frontend deps
-cd src-tauri && cargo test  # 43 Rust tests
+cd src-tauri && cargo test  # 62 Rust tests
 cd .. && npm run tauri dev  # full native app
 ```
 
@@ -167,14 +168,14 @@ cd .. && npm run tauri dev  # full native app
 
 A launcher does several things heuristics dislike, so the choices here are deliberate and verifiable in the code:
 
-- **SteamCMD is downloaded and executed** — Valve's own signed tool, fetched once from `steamcdn-a.akamaihd.net`. "Download an executable, then run it" is a dropper pattern; that is what it is.
+- **SteamCMD is downloaded and executed** — Valve's own signed tool, fetched from `steamcdn-a.akamaihd.net` and unpacked in-process, but only once you open the Steam sign-in. Nothing is downloaded or run at startup. "Download an executable, then run it" is still a dropper pattern; that is what it is.
 - **The build is unsigned**, so SmartScreen will warn. The fix is code signing, not behaviour.
-- **Steam's account files are never read.** No `config/loginusers.vdf`, no `ssfn*`, no run keys — the exact pattern session-stealer malware uses. The Steam library is located via the `SteamPath` registry value and `libraryfolders.vdf`, which hold no credentials.
-- **No `taskkill`, no `reg query`, no shelling out.** Stopping a game uses `TerminateProcess` over a toolhelp process-tree walk; the Steam path comes straight from the registry.
+- **The Steam client's account files are never read.** Nothing under the Steam install's `config/` (`loginusers.vdf`, `ssfn*`), no run keys — the exact pattern session-stealer malware uses. Only SteamCMD's *own* config inside `%LOCALAPPDATA%/Hyperion/steamcmd` is checked, to tell whether its sign-in is cached. Scanning this PC's Steam library (`libraryfolders.vdf`, app manifests, `userdata/*/config/localconfig.vdf`) is off until you turn it on.
+- **No `taskkill`, no `reg query`, no `tar`, no PowerShell.** Stopping a game uses `TerminateProcess` over a toolhelp process-tree walk, the Steam path comes straight from the registry, archives are unpacked in-process, and folders and links open through `ShellExecute`. The only programs Hyperion starts are your games and SteamCMD.
 - **No services, scheduled tasks, startup entries or run keys.**
 - **No memory reading or injection** anywhere: no `ReadProcessMemory`, `CreateRemoteThread`, `SetWindowsHookEx`, DLL injection or drivers.
 
-Process monitoring stays cheap on purpose: a known PID is watched with `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject` every 3 s, and games started outside the launcher are found by process *name* snapshot at startup and once a minute.
+Process monitoring stays cheap on purpose: a known PID is watched with `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject` every 3 s, and games started outside the launcher are found by process *name* snapshot at startup and once a minute — only processes whose name matches an executable in that game's folder are opened.
 
 If Defender flags the app or `steamcmd.exe`, add an exclusion for the launcher folder and `%LOCALAPPDATA%/Hyperion`, then report the false positive.
 

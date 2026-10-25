@@ -697,28 +697,10 @@ export const steamInstallGame = async (
   console.log(`Mock Steam native download triggered for App ID: ${appId}`);
 };
 
-export const steamStartAutomaticLogin = async (): Promise<void> => {
+/** Sets up the SteamCMD engine before the first Steam sign-in (no-op once installed) */
+export const steamPrepareEngine = async (): Promise<void> => {
   if (isTauri()) {
-    return invoke<void>('steam_start_automatic_login');
-  }
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const mockStatus: SteamAuthStatus = {
-        logged_in: true,
-        account_name: 'SteamPioneer',
-        steam_id: '76561198000000000',
-      };
-      window.dispatchEvent(
-        new CustomEvent('hyperion:steam-login-success', { detail: mockStatus })
-      );
-      resolve();
-    }, 2000);
-  });
-};
-
-export const steamCancelAutomaticLogin = async (): Promise<void> => {
-  if (isTauri()) {
-    return invoke<void>('steam_cancel_automatic_login');
+    return invoke<void>('steam_prepare_engine');
   }
 };
 

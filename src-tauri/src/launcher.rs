@@ -89,7 +89,15 @@ impl Launcher {
 
         info!("Spawning game process: {}", exe_path.display());
         info!("Working directory: {}", working_dir.display());
-        debug!("Launch arguments: {:?}", args);
+        // The exchange code is a live credential: never write it to a log
+        let shown: Vec<String> = args
+            .iter()
+            .map(|arg| match arg.split_once('=') {
+                Some((key, _)) if key.eq_ignore_ascii_case("-AUTH_PASSWORD") => format!("{}=<redacted>", key),
+                _ => arg.clone(),
+            })
+            .collect();
+        debug!("Launch arguments: {:?}", shown);
 
         let mut cmd = Command::new(&exe_path);
         cmd.args(&args).current_dir(working_dir);

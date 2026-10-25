@@ -240,8 +240,6 @@ pub struct AppSettings {
     pub steam_account: Option<String>,
     #[serde(default)]
     pub steam_id: Option<String>,
-    #[serde(default)]
-    pub steam_token: Option<String>,
     /// DPAPI-encrypted Steam password (base64). Never stored in plaintext.
     #[serde(default)]
     pub steam_password_enc: Option<String>,
@@ -279,7 +277,6 @@ impl Default for AppSettings {
             platform: "Windows".to_string(),
             steam_account: None,
             steam_id: None,
-            steam_token: None,
             steam_password_enc: None,
             steam_library_scan: false,
             bootstrap_done: false,

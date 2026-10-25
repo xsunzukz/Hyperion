@@ -23,6 +23,7 @@ import { GameItem, ManifestInfo, SteamStoreItem, SteamStoreDetails, SteamAuthSta
 import {
   gameInstallCustomManifest,
   manifestInspect,
+  manifestPrefetch,
   selectDirectory,
   selectManifestFile,
   settingsGet,
@@ -237,7 +238,9 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
     }
   };
 
-  const triggerInspect = async (pathOrUrl?: string) => {
+  /** `refresh` re-downloads a URL manifest (falling back to the saved copy when
+   *  offline) instead of serving the cache, so a republished build is used. */
+  const triggerInspect = async (pathOrUrl?: string, refresh = false) => {
     const target = (pathOrUrl ?? manifestPathOrUrl).trim();
     if (!target) {
       setInspectError('Please provide a valid manifest path or URL');
@@ -249,7 +252,8 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
     setSubmitError(null);
 
     try {
-      const info = await manifestInspect(target);
+      const info = refresh ? await manifestPrefetch(target) : await manifestInspect(target);
+      if (!info) throw new Error('Could not read the manifest');
       setManifestInfo(info);
 
       if (info.app_name && !customAppName) {
@@ -290,10 +294,11 @@ export const CustomManifestModal: React.FC<CustomManifestModalProps> = ({
   };
 
   // Opened with a manifest already filled in (e.g. the featured build's INSTALL
-  // button): verify it straight away so the dialog is ready to install.
+  // button): fetch the current copy and verify it straight away, so the dialog
+  // is ready to install. This replaces the old fetch on every app start.
   useEffect(() => {
     if (!isOpen || !presetManifestUrl) return;
-    triggerInspect(presetManifestUrl);
+    triggerInspect(presetManifestUrl, true);
     // Re-running only matters when a different manifest is pre-filled
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, presetManifestUrl]);
