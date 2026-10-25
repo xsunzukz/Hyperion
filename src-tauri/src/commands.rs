@@ -889,10 +889,12 @@ pub async fn app_bootstrap(
     let mut steamcmd_ready = crate::steam::downloader::SteamDownloadManager::steamcmd_installed();
 
     if first_run && !steamcmd_ready {
+        // Deliberately vague: the splash should not narrate which engine is being
+        // fetched or where it comes from. The real reason stays in the log.
         emit(
             "steamcmd",
-            "Installing SteamCMD",
-            Some("Downloading Valve's official engine without admin rights".to_string()),
+            "Setting this up",
+            Some("Preparing the download engine".to_string()),
             None,
             false,
         );
@@ -900,34 +902,22 @@ pub async fn app_bootstrap(
         match crate::steam::downloader::SteamDownloadManager::ensure_steamcmd().await {
             Ok(_) => {
                 steamcmd_ready = true;
-                emit(
-                    "steamcmd",
-                    "SteamCMD ready",
-                    Some("Installed into your local app data".to_string()),
-                    Some(100.0),
-                    false,
-                );
+                emit("steamcmd", "Setting this up", None, Some(100.0), true);
             }
             Err(e) => {
-                // Not fatal: Epic downloads keep working, Steam installs will retry.
+                // Not fatal: Epic downloads keep working, Steam installs retry later.
                 warn!("SteamCMD install failed during bootstrap: {}", e);
                 emit(
                     "steamcmd",
-                    "SteamCMD skipped",
-                    Some(format!("{} — Steam downloads will retry later", e)),
+                    "Setting this up",
+                    Some("Skipped for now — it will retry when needed".to_string()),
                     Some(100.0),
-                    false,
+                    true,
                 );
             }
         }
     } else {
-        emit(
-            "steamcmd",
-            "SteamCMD already installed",
-            None,
-            Some(100.0),
-            false,
-        );
+        emit("steamcmd", "Setting this up", None, Some(100.0), true);
     }
 
     emit(
