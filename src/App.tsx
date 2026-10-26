@@ -6,12 +6,13 @@ import { GameDetailModal } from './components/GameDetailModal';
 import { DownloadsView } from './components/DownloadsView';
 import { CloudSavesView } from './components/CloudSavesView';
 import { SettingsView } from './components/SettingsView';
+import { AccountView } from './components/AccountView';
 import { AboutView } from './components/AboutView';
-import { BootScreen } from './components/BootScreen';
 import { LoginModal } from './components/LoginModal';
 import { LoginGate } from './components/LoginGate';
 import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
+import { CancelDownloadDialog } from './components/CancelDownloadDialog';
 import {
   AppSettings,
   DownloadProgress,
@@ -22,6 +23,7 @@ import {
   ViewMode,
 } from './types';
 import {
+  appBootstrap,
   authLogout,
   authResumeSession,
   catalogGetGames,
@@ -51,6 +53,19 @@ const SPONSOR_MANIFEST_URL = 'https://api.mysticfox.dev/v2/Dauntless_1.14.7.6474
 /** The app name inside that manifest: Epic's codename for Dauntless */
 const SPONSOR_APP_NAME = 'Jackal';
 const SPONSOR_TITLE = 'Dauntless';
+
+/** Statuses that mean a queue entry is already in flight. */
+const LIVE_DOWNLOAD_STATUSES: DownloadProgress['status'][] = [
+  'Queued',
+  'Analyzing',
+  'Downloading',
+  'Paused',
+  'Verifying',
+  'Installing',
+];
+
+const isLiveDownload = (status: DownloadProgress['status']) =>
+  LIVE_DOWNLOAD_STATUSES.includes(status);
 
 /** Without an Epic catalog entry the featured build would show up as a bare
  *  "Jackal" card with stock art. */
@@ -100,8 +115,12 @@ export const App: React.FC = () => {
   // Steam connected but the local library scan is off -> titles are hidden
   const [steamLibraryHint, setSteamLibraryHint] = useState<AppSettings | null>(null);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-  // Startup splash: staged bootstrap (files -> SteamCMD -> library), then the shell.
-  const [booted, setBooted] = useState(false);
+  // Active download awaiting destructive-cancel confirmation.
+  const [cancelCandidate, setCancelCandidate] = useState<DownloadProgress | null>(null);
+  const [isCancellingDownload, setIsCancellingDownload] = useState(false);
+  // Wait for the saved session check before loading the library, so the first
+  // request already knows whether Epic is signed in.
+  const [sessionChecked, setSessionChecked] = useState(false);
   // Set when the user chooses "continue offline" on the sign-in gate.
   const [skipLogin, setSkipLogin] = useState(false);
 
@@ -214,6 +233,14 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // Warm the backend in the background: no splash, the shell is interactive
+  // immediately while the catalog and Steam state settle.
+  useEffect(() => {
+    appBootstrap(false).catch((e) => {
+      console.error('Startup bootstrap failed:', e);
+    });
+  }, []);
+
   // Resume auth session on mount
   useEffect(() => {
     const initAuth = async () => {
@@ -224,6 +251,8 @@ export const App: React.FC = () => {
         }
       } catch (e) {
         console.error('Session resume error:', e);
+      } finally {
+        setSessionChecked(true);
       }
     };
     initAuth();
@@ -255,10 +284,9 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // The bootstrap already warmed the library; wait for the splash to finish.
-    if (!booted) return;
+    if (!sessionChecked) return;
     loadGames(false);
-  }, [user, booted]);
+  }, [user, sessionChecked]);
 
   // Opens the in-app Steam sign-in prompt and remembers which download to resume
   const requestSteamAuth = async (mode: 'full' | 'guard', appName: string, title: string) => {
@@ -365,33 +393,101 @@ export const App: React.FC = () => {
     setIsCustomManifestOpen(true);
   };
 
-  const handleInstall = async (game: GameItem) => {
-    // Dauntless installs from the community build, never Epic's delisted one
-    if (game.app_name === SPONSOR_APP_NAME) {
-      handleSponsorInstall();
-      return;
-    }
+  /**
+   * Put a row in the Downloads queue before the backend has fetched the
+   * manifest. The real `download-progress` event replaces this placeholder as
+   * soon as the first chunk pipeline reports in.
+   */
+  const queueDownload = (appName: string, title: string, totalBytes = 0) => {
+    const placeholder: DownloadProgress = {
+      app_name: appName,
+      title,
+      status: 'Queued',
+      total_bytes: totalBytes,
+      downloaded_bytes: 0,
+      total_chunks: 0,
+      downloaded_chunks: 0,
+      speed_bytes_per_sec: 0,
+      eta_seconds: 0,
+      progress_percent: 0,
+    };
+
+    setDownloads((prev) => {
+      const current = prev[appName];
+      if (current && isLiveDownload(current.status)) return prev;
+      return { ...prev, [appName]: placeholder };
+    });
+    setActiveTab('downloads');
+    // The detail modal would otherwise hide the queue we just opened.
+    setSelectedGame(null);
+  };
+
+  const requestGameInstall = async (appName: string, title: string) => {
     try {
-      if (game.platform === 'steam') {
-        showNotification(`Preparing in-app download for ${game.title}`, 'info');
-      } else {
-        showNotification(`Queued download for ${game.title}`, 'info');
-      }
-      await gameInstall(game.app_name);
-      setActiveTab('downloads');
+      await gameInstall(appName);
+
+      // The backend has accepted the job; the first progress event usually
+      // lands moments later, but do not leave the row at "Queued" if it is slow.
+      setDownloads((prev) => {
+        const current = prev[appName];
+        if (!current || current.status !== 'Queued') return prev;
+        return { ...prev, [appName]: { ...current, status: 'Analyzing' } };
+      });
+      return true;
     } catch (e: any) {
       const message = e?.toString() || 'Unknown error';
       console.error('Install failed:', e);
 
       // The headless Steam engine needs a Steam session before it can download
       if (message.includes('STEAM_LOGIN_REQUIRED')) {
-        showNotification(`Sign in to Steam to download ${game.title} in-app`, 'info');
-        await requestSteamAuth('full', game.app_name, game.title);
-        return;
+        setDownloads((prev) => {
+          if (prev[appName]?.status !== 'Queued') return prev;
+          const next = { ...prev };
+          delete next[appName];
+          return next;
+        });
+        showNotification(`Sign in to Steam to download ${title} in-app`, 'info');
+        await requestSteamAuth('full', appName, title);
+        return false;
       }
 
+      setDownloads((prev) => {
+        const current = prev[appName];
+        if (!current || (current.status !== 'Queued' && current.status !== 'Analyzing')) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [appName]: { ...current, status: 'Failed', error_message: message },
+        };
+      });
       showNotification(`Install failed: ${message}`, 'error');
+      return false;
     }
+  };
+
+  const handleInstall = async (game: GameItem) => {
+    // Dauntless installs from the community build, never Epic's delisted one
+    if (game.app_name === SPONSOR_APP_NAME) {
+      handleSponsorInstall();
+      return;
+    }
+
+    const current = downloads[game.app_name];
+    if (current && isLiveDownload(current.status)) {
+      setActiveTab('downloads');
+      setSelectedGame(null);
+      return;
+    }
+
+    queueDownload(game.app_name, game.title, game.install_size || 0);
+    showNotification(
+      game.platform === 'steam'
+        ? `Preparing in-app download for ${game.title}`
+        : `Queued download for ${game.title}`,
+      'info'
+    );
+    await requestGameInstall(game.app_name, game.title);
   };
 
   const handleSteamAuthSubmit = async (data: {
@@ -437,17 +533,15 @@ export const App: React.FC = () => {
       return;
     }
 
-    try {
-      await gameInstall(request.appName);
-      setActiveTab('downloads');
+    queueDownload(request.appName, request.title);
+    const started = await requestGameInstall(request.appName, request.title);
+    if (started) {
       showNotification(
         request.mode === 'guard'
           ? 'Steam Guard confirmed — resuming download'
           : 'Steam session ready — download started',
         'success'
       );
-    } catch (e: any) {
-      showNotification(`Install failed: ${e?.toString() || 'Unknown error'}`, 'error');
     }
   };
 
@@ -516,6 +610,35 @@ export const App: React.FC = () => {
     }
   };
 
+  /** Finished entries are just dismissed; active ones need confirmation. */
+  const handleCancelRequest = (appName: string) => {
+    const target = downloads[appName];
+    if (!target) return;
+
+    const finished =
+      target.status === 'Completed' ||
+      target.status === 'Cancelled' ||
+      target.status === 'Failed';
+    if (finished) {
+      void handleCancelOrDismissDownload(appName);
+      return;
+    }
+
+    setCancelCandidate(target);
+  };
+
+  const handleConfirmCancelDownload = async () => {
+    if (!cancelCandidate || isCancellingDownload) return;
+
+    setIsCancellingDownload(true);
+    try {
+      await handleCancelOrDismissDownload(cancelCandidate.app_name);
+    } finally {
+      setIsCancellingDownload(false);
+      setCancelCandidate(null);
+    }
+  };
+
   // Filtered games computation
   const filteredGames = useMemo(() => {
     return games.filter((game) => {
@@ -541,14 +664,10 @@ export const App: React.FC = () => {
   }, [games, searchQuery, selectedFilter, platformFilter]);
 
   const activeDownloadsList = Object.values(downloads).filter(
-    (d) => d.status === 'Downloading' || d.status === 'Analyzing' || d.status === 'Paused'
+    (d) => d.status === 'Queued' || d.status === 'Downloading' || d.status === 'Analyzing' || d.status === 'Paused'
   );
 
   const runningGamesList = useMemo(() => Object.values(runningGames), [runningGames]);
-
-  if (!booted) {
-    return <BootScreen onDone={() => setBooted(true)} />;
-  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#050507] text-white select-none">
@@ -556,9 +675,6 @@ export const App: React.FC = () => {
       <Sidebar
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        user={user}
-        onOpenLogin={() => setIsLoginModalOpen(true)}
-        onLogout={handleLogout}
         activeDownloadsCount={activeDownloadsList.length}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={toggleSidebar}
@@ -812,7 +928,7 @@ export const App: React.FC = () => {
               downloads={Object.values(downloads)}
               onPause={handlePauseDownload}
               onResume={handleResumeDownload}
-              onCancel={handleCancelOrDismissDownload}
+              onCancel={handleCancelRequest}
               onRetry={(appName) => {
                 if (appName === SPONSOR_APP_NAME) {
                   handleSponsorInstall();
@@ -837,12 +953,20 @@ export const App: React.FC = () => {
 
           {activeTab === 'cloud-saves' && <CloudSavesView games={games} />}
 
-          {activeTab === 'settings' && (
-            <SettingsView
+          {activeTab === 'account' && (
+            <AccountView
+              user={user}
+              onOpenLogin={() => setIsLoginModalOpen(true)}
+              onLogout={handleLogout}
               onRequestSteamLogin={() => requestSteamAuth('full', '', '')}
               steamAuthVersion={steamAuthVersion}
-              onSettingsSaved={() => loadGames(false)}
+              onSettingsChanged={() => loadGames(false)}
+              onSteamAuthChanged={() => setSteamAuthVersion((v) => v + 1)}
             />
+          )}
+
+          {activeTab === 'settings' && (
+            <SettingsView onSettingsSaved={() => loadGames(false)} />
           )}
 
           {activeTab === 'about' && <AboutView />}
@@ -915,9 +1039,22 @@ export const App: React.FC = () => {
           onSubmit={handleSteamAuthSubmit}
         />
       )}
+      {/* Destructive confirmation for stopping an active download */}
+      {cancelCandidate && (
+        <CancelDownloadDialog
+          title={cancelCandidate.title}
+          downloadedBytes={cancelCandidate.downloaded_bytes}
+          isCancelling={isCancellingDownload}
+          onConfirm={handleConfirmCancelDownload}
+          onClose={() => {
+            if (!isCancellingDownload) setCancelCandidate(null);
+          }}
+        />
+      )}
+
       {/* Sign-in gate: the shell stays mounted underneath, so the real Epic
           login modal (z-50) opens on top of it. */}
-      {!user && !skipLogin && (
+      {sessionChecked && !user && !skipLogin && (
         <LoginGate
           onSignIn={() => setIsLoginModalOpen(true)}
           onSkip={() => setSkipLogin(true)}

@@ -6,20 +6,17 @@ import {
   Cloud,
   Settings,
   Info,
-  LogOut,
-  LogIn,
+  ChevronRight,
   PanelLeftClose,
   PanelLeftOpen,
   Square,
+  UserRound,
 } from 'lucide-react';
-import { NavigationTab, RunningGame, UserProfile } from '../types';
+import { NavigationTab, RunningGame } from '../types';
 
 interface SidebarProps {
   activeTab: NavigationTab;
   onTabChange: (tab: NavigationTab) => void;
-  user: UserProfile | null;
-  onOpenLogin: () => void;
-  onLogout: () => void;
   activeDownloadsCount: number;
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -30,9 +27,6 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({
   activeTab,
   onTabChange,
-  user,
-  onOpenLogin,
-  onLogout,
   activeDownloadsCount,
   collapsed,
   onToggleCollapsed,
@@ -58,16 +52,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside
-      className={`flex-shrink-0 flex flex-col justify-between glass-panel border-r border-zinc-800/80 bg-[#07070a]/95 z-20 overflow-hidden transition-[width] duration-300 ease-out ${
-        collapsed ? 'w-[4.5rem]' : 'w-64'
-      }`}
+      className={`flex-shrink-0 flex flex-col justify-between glass-panel border-r border-zinc-800/80 bg-[#07070a]/95 z-20 overflow-hidden transition-[width] duration-300 ease-out ${collapsed ? 'w-[4.5rem]' : 'w-64'
+        }`}
     >
       <div className="min-w-0 flex-1 flex flex-col min-h-0">
         {/* Brand Header with the Hyperion logo */}
         <div
-          className={`h-18 flex items-center border-b border-zinc-800/80 bg-black/40 shrink-0 ${
-            collapsed ? 'justify-center px-2' : 'gap-3.5 px-5'
-          }`}
+          className={`h-18 flex items-center border-b border-zinc-800/80 bg-black/40 shrink-0 ${collapsed ? 'justify-center px-2' : 'gap-3.5 px-5'
+            }`}
         >
           <div className="w-10 h-10 rounded-xl bg-black border border-orange-500/40 flex items-center justify-center shadow-lg shadow-orange-500/20 overflow-hidden shrink-0">
             <img
@@ -103,13 +95,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 key={item.id}
                 onClick={() => onTabChange(item.id)}
                 title={collapsed ? item.label : undefined}
-                className={`relative w-full flex items-center rounded-xl font-medium text-xs transition-all duration-200 cursor-pointer ${
-                  collapsed ? 'justify-center px-0 py-2.5' : 'justify-between px-3.5 py-2.5'
-                } ${
-                  isActive
+                className={`relative w-full flex items-center rounded-xl font-medium text-xs transition-all duration-200 cursor-pointer ${collapsed ? 'justify-center px-0 py-2.5' : 'justify-between px-3.5 py-2.5'
+                  } ${isActive
                     ? 'bg-gradient-to-r from-orange-600 to-amber-600 text-white shadow-lg shadow-orange-600/30 font-bold border border-orange-400/40'
                     : 'text-zinc-400 hover:text-white hover:bg-zinc-900/70 border border-transparent'
-                }`}
+                  }`}
               >
                 <div className={`flex items-center ${collapsed ? '' : 'gap-3'}`}>
                   <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-zinc-400'}`} />
@@ -142,9 +132,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 {visibleRunning.map((game) => (
                   <div
                     key={game.app_name}
-                    className={`group flex items-center rounded-lg border border-transparent hover:border-zinc-800 hover:bg-zinc-900/70 transition ${
-                      collapsed ? 'justify-center p-1' : 'gap-2 px-2.5 py-1.5'
-                    }`}
+                    className={`group flex items-center rounded-lg border border-transparent hover:border-zinc-800 hover:bg-zinc-900/70 transition ${collapsed ? 'justify-center p-1' : 'gap-2 px-2.5 py-1.5'
+                      }`}
                   >
                     {!collapsed && (
                       <>
@@ -161,9 +150,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       onClick={() => onStopGame?.(game.app_name)}
                       title={`Stop ${game.title}`}
                       aria-label={`Stop ${game.title}`}
-                      className={`relative flex items-center justify-center rounded-md border border-rose-500/30 bg-rose-600/10 text-rose-300 hover:bg-rose-600 hover:text-white hover:border-rose-500 transition cursor-pointer ${
-                        collapsed ? 'w-9 h-9' : 'w-6 h-6'
-                      }`}
+                      className={`relative flex items-center justify-center rounded-md border border-rose-500/30 bg-rose-600/10 text-rose-300 hover:bg-rose-600 hover:text-white hover:border-rose-500 transition cursor-pointer ${collapsed ? 'w-9 h-9' : 'w-6 h-6'
+                        }`}
                     >
                       <Square className={collapsed ? 'w-3 h-3 fill-current' : 'w-2.5 h-2.5 fill-current'} />
                       {collapsed && (
@@ -186,82 +174,77 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </nav>
       </div>
 
-      <div className="shrink-0">
-        {/* Collapse toggle */}
-        <div className="px-2 pt-2">
+      <div className="shrink-0 border-t border-zinc-800/70 bg-black/40 p-2.5">
+        {/* Account management replaces the old profile card */}
+        <button
+          onClick={() => onTabChange('account')}
+          title="Account Management"
+          aria-label="Account Management"
+          aria-current={activeTab === 'account' ? 'page' : undefined}
+          className={`group flex w-full items-center rounded-xl border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${collapsed ? 'justify-center px-0 py-2' : 'gap-2.5 px-2 py-2'
+            } ${activeTab === 'account'
+              ? 'border-orange-500/30 bg-orange-500/10 text-white'
+              : 'border-zinc-800/70 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900/80'
+            }`}
+        >
+          <span
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition ${activeTab === 'account'
+                ? 'border-orange-400/50 bg-orange-500/20'
+                : 'border-zinc-800 bg-zinc-900 group-hover:border-orange-500/30'
+              }`}
+          >
+            <UserRound
+              className={`h-4 w-4 ${activeTab === 'account'
+                  ? 'text-orange-300'
+                  : 'text-zinc-400 group-hover:text-orange-400'
+                }`}
+            />
+          </span>
+          {!collapsed && (
+            <>
+              <span className="min-w-0 flex-1 text-left">
+                <span
+                  className={`block truncate text-[11px] font-bold ${activeTab === 'account' ? 'text-white' : 'text-zinc-200'
+                    }`}
+                >
+                  Account Management
+                </span>
+                <span className="block truncate text-[10px] font-medium text-zinc-500">
+                  Manage all your accounts.
+                </span>
+              </span>
+              <ChevronRight
+                className={`h-3.5 w-3.5 shrink-0 ${activeTab === 'account'
+                    ? 'text-orange-300'
+                    : 'text-zinc-600 group-hover:text-zinc-400'
+                  }`}
+              />
+            </>
+          )}
+        </button>
+
+        {!collapsed ? (
+          <div className="mt-1 flex justify-end">
+            <button
+              onClick={onToggleCollapsed}
+              title="Collapse sidebar (Ctrl+B)"
+              aria-label="Collapse sidebar"
+              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] font-medium text-zinc-600 transition hover:bg-zinc-900/60 hover:text-zinc-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-orange-500/40"
+            >
+              <PanelLeftClose className="h-3.5 w-3.5" />
+              <span>Collapse</span>
+            </button>
+          </div>
+        ) : (
           <button
             onClick={onToggleCollapsed}
-            title={collapsed ? 'Expand sidebar (Ctrl+B)' : 'Collapse sidebar (Ctrl+B)'}
-            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            className={`flex items-center rounded-lg text-[11px] font-semibold text-zinc-400 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition cursor-pointer ${
-              collapsed ? 'w-full justify-center py-2' : 'w-full gap-2 px-3 py-2'
-            }`}
+            title="Expand sidebar (Ctrl+B)"
+            aria-label="Expand sidebar"
+            className="mt-1 flex w-full items-center justify-center rounded-lg py-2 text-zinc-500 transition hover:bg-zinc-900 hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/40"
           >
-            {collapsed ? (
-              <PanelLeftOpen className="w-4 h-4" />
-            ) : (
-              <>
-                <PanelLeftClose className="w-4 h-4" />
-                <span>Collapse</span>
-              </>
-            )}
+            <PanelLeftOpen className="h-4 w-4" />
           </button>
-        </div>
-
-        {/* User Section */}
-        <div className={`border-t border-zinc-800/80 bg-black/60 mt-2 ${collapsed ? 'p-2' : 'p-4'}`}>
-          {user && user.logged_in ? (
-            collapsed ? (
-              <button
-                onClick={onLogout}
-                title={`${user.display_name} — sign out`}
-                className="mx-auto w-9 h-9 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-bold text-xs text-white shadow-md cursor-pointer"
-              >
-                {user.display_name.charAt(0).toUpperCase()}
-              </button>
-            ) : (
-              <div className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800">
-                <div className="flex items-center gap-3 overflow-hidden">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center font-bold text-xs text-white shadow-md shrink-0">
-                    {user.display_name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="overflow-hidden">
-                    <div className="text-xs font-bold truncate text-white">
-                      {user.display_name}
-                    </div>
-                    <div className="text-[10px] text-orange-400 flex items-center gap-1 font-medium">
-                      <span className="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse inline-block"></span>
-                      Connected
-                    </div>
-                  </div>
-                </div>
-                <button
-                  onClick={onLogout}
-                  title="Sign Out"
-                  className="p-1.5 text-zinc-400 hover:text-orange-400 hover:bg-orange-500/10 rounded-lg transition cursor-pointer"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              </div>
-            )
-          ) : collapsed ? (
-            <button
-              onClick={onOpenLogin}
-              title="Sign In / Connect Accounts"
-              className="mx-auto w-9 h-9 rounded-xl gradient-primary text-white flex items-center justify-center shadow-lg shadow-orange-600/30 hover:opacity-95 transition cursor-pointer"
-            >
-              <LogIn className="w-4 h-4" />
-            </button>
-          ) : (
-            <button
-              onClick={onOpenLogin}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl gradient-primary text-white font-bold text-xs shadow-lg shadow-orange-600/30 hover:opacity-95 transition cursor-pointer"
-            >
-              <LogIn className="w-4 h-4" />
-              <span>Sign In / Connect Accounts</span>
-            </button>
-          )}
-        </div>
+        )}
       </div>
     </aside>
   );

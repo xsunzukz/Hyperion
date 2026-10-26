@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Pause, Play, X, AlertCircle } from 'lucide-react';
+import { Download, Pause, Play, X, AlertCircle, Loader2 } from 'lucide-react';
 import { DownloadProgress } from '../types';
 
 interface DownloadsViewProps {
@@ -78,14 +78,18 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                           ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40'
                           : d.status === 'Paused'
                           ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                          : d.status === 'Queued'
+                          ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
                           : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
                       }`}
                     >
                       {d.status}
                     </span>
                     <span className="text-zinc-500">•</span>
-                    <span className="text-zinc-400">
-                      {d.app_name.startsWith('steam_')
+                    <span className={d.status === 'Queued' ? 'text-sky-400/80' : 'text-zinc-400'}>
+                      {d.status === 'Queued'
+                        ? 'Preparing download...'
+                        : d.app_name.startsWith('steam_')
                         ? 'Steam engine'
                         : `${d.downloaded_chunks} / ${d.total_chunks} chunks`}
                     </span>
@@ -113,47 +117,66 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     </button>
                   ) : null}
 
-                  <button
-                    onClick={() => onCancel(d.app_name)}
-                    className="p-2.5 rounded-xl bg-zinc-900 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/40 text-zinc-400 border border-zinc-800 transition cursor-pointer"
-                    title={
-                      d.status === 'Completed' || d.status === 'Cancelled' || d.status === 'Failed'
-                        ? 'Dismiss from queue'
-                        : 'Cancel download and delete partial files'
-                    }
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                  {d.status !== 'Queued' && (
+                    <button
+                      onClick={() => onCancel(d.app_name)}
+                      className="p-2.5 rounded-xl bg-zinc-900 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/40 text-zinc-400 border border-zinc-800 transition cursor-pointer"
+                      title={
+                        d.status === 'Completed' || d.status === 'Cancelled' || d.status === 'Failed'
+                          ? 'Dismiss from queue'
+                          : 'Cancel download and delete partial files'
+                      }
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* Progress Bar */}
-              <div className="space-y-2">
-                <div className="w-full h-2.5 rounded-full bg-zinc-900 border border-zinc-800/80 overflow-hidden relative">
-                  <div
-                    className="h-full gradient-primary rounded-full transition-all duration-300"
-                    style={{ width: `${d.progress_percent}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                  <span>
-                    {formatBytes(d.downloaded_bytes)} /{' '}
-                    {d.total_bytes > 0 ? formatBytes(d.total_bytes) : '—'} (
-                    {Math.min(100, Math.max(0, d.progress_percent)).toFixed(1)}%)
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {d.status === 'Downloading' ? (
-                      <>
-                        <span className="text-orange-400 font-semibold">{formatSpeed(d.speed_bytes_per_sec)}</span>
-                        <span className="text-zinc-600">|</span>
-                        <span>ETA: {formatEta(d.eta_seconds)}</span>
-                      </>
-                    ) : (
-                      <span>{d.status}</span>
-                    )}
+              {d.status === 'Queued' ? (
+                <div className="space-y-2">
+                  <div className="w-full h-2.5 rounded-full bg-zinc-900 border border-zinc-800/80 overflow-hidden">
+                    <div className="queue-loading-slide h-full w-1/3 rounded-full bg-sky-500/60" />
+                  </div>
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                    <span className="flex items-center gap-1.5 text-sky-300/90">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Resolving manifest...
+                    </span>
+                    <span className="text-zinc-600">Starting soon</span>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="w-full h-2.5 rounded-full bg-zinc-900 border border-zinc-800/80 overflow-hidden relative">
+                    <div
+                      className="h-full gradient-primary rounded-full transition-all duration-300"
+                      style={{ width: `${d.progress_percent}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+                    <span>
+                      {formatBytes(d.downloaded_bytes)} /{' '}
+                      {d.total_bytes > 0 ? formatBytes(d.total_bytes) : '—'} (
+                      {Math.min(100, Math.max(0, d.progress_percent)).toFixed(1)}%)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {d.status === 'Downloading' ? (
+                        <>
+                          <span className="text-orange-400 font-semibold">
+                            {formatSpeed(d.speed_bytes_per_sec)}
+                          </span>
+                          <span className="text-zinc-600">|</span>
+                          <span>ETA: {formatEta(d.eta_seconds)}</span>
+                        </>
+                      ) : (
+                        <span>{d.status}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Error Message if Failed */}
               {d.status === 'Failed' && d.error_message && (

@@ -76,7 +76,9 @@ export const GameDetailModal: React.FC<GameDetailModalProps> = ({
 
   const isDownloading =
     downloadProgress &&
-    (downloadProgress.status === 'Downloading' || downloadProgress.status === 'Analyzing');
+    (downloadProgress.status === 'Queued' ||
+      downloadProgress.status === 'Downloading' ||
+      downloadProgress.status === 'Analyzing');
 
   const defaultBanner =
     'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80';
@@ -219,8 +221,16 @@ export const GameDetailModal: React.FC<GameDetailModalProps> = ({
               ) : isDownloading ? (
                 <div className="space-y-1.5 w-64">
                   <div className="flex justify-between text-xs font-semibold text-orange-400">
-                    <span>Downloading {downloadProgress.progress_percent.toFixed(1)}%</span>
-                    <span>{(downloadProgress.speed_bytes_per_sec / (1024 * 1024)).toFixed(1)} MB/s</span>
+                    <span>
+                      {downloadProgress.status === 'Queued'
+                        ? 'Preparing download...'
+                        : `Downloading ${downloadProgress.progress_percent.toFixed(1)}%`}
+                    </span>
+                    <span>
+                      {downloadProgress.status === 'Queued'
+                        ? 'Starting soon'
+                        : `${(downloadProgress.speed_bytes_per_sec / (1024 * 1024)).toFixed(1)} MB/s`}
+                    </span>
                   </div>
                   <div className="w-full h-2 rounded-full bg-zinc-900 overflow-hidden">
                     <div

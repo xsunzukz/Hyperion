@@ -20,7 +20,7 @@ pub mod winproc;
 mod tests;
 
 use std::sync::Arc;
-use tauri::WindowEvent;
+use tauri::{Manager, WindowEvent};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 pub fn run() {
@@ -111,13 +111,26 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
-            // Closing parks the launcher in the tray: downloads, the Steam
-            // engine and the running-game watcher all keep going. Minimising
-            // stays a normal minimise — the taskbar is still where people expect
-            // a minimised window to be.
+            // Closing normally parks the launcher in the tray: downloads, the
+            // Steam engine and the running-game watcher all keep going. This is
+            // a preference, so turning it off lets the window close and the
+            // process exit like a normal desktop app. Minimising stays a normal
+            // minimise — the taskbar is still where people expect it.
             WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                let _ = window.hide();
+                let close_to_tray = window
+                    .app_handle()
+                    .state::<Arc<crate::state::AppState>>()
+                    .storage
+                    .get_settings()
+                    .map(|settings| settings.close_to_tray)
+                    .unwrap_or(true);
+
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else {
+                    tracing::info!("Close-to-tray is disabled; exiting Hyperion");
+                }
             }
             _ => {}
         })

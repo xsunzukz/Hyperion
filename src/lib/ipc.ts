@@ -167,6 +167,7 @@ let mockSettings: AppSettings = {
   skip_update_check: false,
   platform: 'Windows',
   steam_library_scan: false,
+  close_to_tray: true,
   bootstrap_done: false,
 };
 

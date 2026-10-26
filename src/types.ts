@@ -5,6 +5,7 @@ export type NavigationTab =
   | 'library' 
   | 'downloads' 
   | 'cloud-saves' 
+  | 'account'
   | 'settings' 
   | 'about';
 
@@ -146,6 +147,8 @@ export interface AppSettings {
   steam_id?: string;
   /** Opt-in: read this PC's Steam library files to list Steam games */
   steam_library_scan: boolean;
+  /** Closing the window keeps Hyperion running in the system tray */
+  close_to_tray: boolean;
   /** Set by the backend once the first-launch bootstrap has finished */
   bootstrap_done: boolean;
 }

@@ -39,7 +39,9 @@ export const GameCard: React.FC<GameCardProps> = ({
 }) => {
   const isDownloading =
     downloadProgress &&
-    (downloadProgress.status === 'Downloading' || downloadProgress.status === 'Analyzing');
+    (downloadProgress.status === 'Queued' ||
+      downloadProgress.status === 'Downloading' ||
+      downloadProgress.status === 'Analyzing');
   const defaultPoster =
     'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&w=600&q=80';
   const coverUrl = game.icon_url || game.banner_url || defaultPoster;
@@ -114,8 +116,16 @@ export const GameCard: React.FC<GameCardProps> = ({
           {isDownloading ? (
             <div className="w-36">
               <div className="flex justify-between text-[11px] font-mono text-orange-300 mb-1">
-                <span>{downloadProgress.progress_percent.toFixed(0)}%</span>
-                <span>{(downloadProgress.speed_bytes_per_sec / (1024 * 1024)).toFixed(1)} MB/s</span>
+                <span>
+                  {downloadProgress.status === 'Queued'
+                    ? 'Preparing...'
+                    : `${downloadProgress.progress_percent.toFixed(0)}%`}
+                </span>
+                <span>
+                  {downloadProgress.status === 'Queued'
+                    ? 'Starting soon'
+                    : `${(downloadProgress.speed_bytes_per_sec / (1024 * 1024)).toFixed(1)} MB/s`}
+                </span>
               </div>
               <div className="w-full h-1.5 rounded-full bg-zinc-900 overflow-hidden">
                 <div
@@ -221,7 +231,9 @@ export const GameCard: React.FC<GameCardProps> = ({
           <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300 bg-black/50 backdrop-blur-sm">
             {isDownloading ? (
               <div className="p-4 rounded-xl glass-panel w-4/5 text-center border border-orange-500/30">
-                <div className="text-xs font-bold text-white mb-1.5">Downloading...</div>
+                <div className="text-xs font-bold text-white mb-1.5">
+                  {downloadProgress.status === 'Queued' ? 'Preparing...' : 'Downloading...'}
+                </div>
                 <div className="w-full h-1.5 rounded-full bg-zinc-900 overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-orange-600 to-amber-500 rounded-full"

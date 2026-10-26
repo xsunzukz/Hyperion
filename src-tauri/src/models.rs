@@ -226,6 +226,10 @@ pub struct RunningGame {
     pub started_at: String,
 }
 
+fn default_close_to_tray() -> bool {
+    true
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -248,6 +252,10 @@ pub struct AppSettings {
     /// default.
     #[serde(default)]
     pub steam_library_scan: bool,
+    /// Closing the window hides Hyperion to the system tray instead of exiting.
+    /// On by default so downloads keep running in the background.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
     /// Set once the first-launch bootstrap (runtime files → SteamCMD → library)
     /// has finished, so the splash screen only does the heavy work once.
     #[serde(default)]
@@ -279,6 +287,7 @@ impl Default for AppSettings {
             steam_id: None,
             steam_password_enc: None,
             steam_library_scan: false,
+            close_to_tray: true,
             bootstrap_done: false,
         }
     }
