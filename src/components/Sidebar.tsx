@@ -210,7 +210,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   Account Management
                 </span>
                 <span className="block truncate text-[10px] font-medium text-zinc-500">
-                  Manage all your accounts.
+                  Manage all your accounts
                 </span>
               </span>
               <ChevronRight

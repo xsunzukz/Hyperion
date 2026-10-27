@@ -519,7 +519,7 @@ export const diagnosticsGet = async (): Promise<SystemDiagnostics> => {
     free_memory_mb: 18432,
     default_install_dir: mockSettings.default_install_dir,
     free_disk_space_gb: 420.5,
-    app_version: '1.0.1',
+    app_version: '1.0.2',
     rust_version: '1.97.1',
   };
 };
