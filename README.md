@@ -15,6 +15,7 @@ Install, verify, repair and play — with downloads that survive bad CDNs, crash
 
 [![Download](https://img.shields.io/github/v/release/xsunzukz/Hyperion?style=for-the-badge&label=download&color=ff6600&labelColor=0a0a0b)](https://github.com/xsunzukz/Hyperion/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows11&logoColor=white&labelColor=0a0a0b)](https://github.com/xsunzukz/Hyperion/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/xsunzukz/Hyperion/build.yml?branch=main&style=for-the-badge&label=build&labelColor=0a0a0b)](https://github.com/xsunzukz/Hyperion/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-8b5cf6?style=for-the-badge&labelColor=0a0a0b)](LICENSE)
 
 **[Download for Windows →](https://github.com/xsunzukz/Hyperion/releases/latest)**<br>

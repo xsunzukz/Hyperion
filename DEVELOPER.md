@@ -175,12 +175,25 @@ cd .. && npm run tauri dev  # full native app
 
 The screenshots in `docs/screenshots/` are captured from the browser preview, so the account names and library are mock data. No real account details are shown.
 
+### Continuous integration
+
+[`.github/workflows/build.yml`](.github/workflows/build.yml) runs on pushes to `main`, pull requests, manual dispatches, and `v*` tags. It uses a Windows runner to:
+
+1. install Node dependencies and build the frontend;
+2. run the Rust test suite;
+3. build the NSIS and MSI bundles with `npm run tauri build`;
+4. create a portable `Hyperion_<version>_standalone.exe` and a `SHA256SUMS.txt`;
+5. upload the artifacts for 14 days.
+
+On a `v*` tag, the workflow first verifies that the tag matches the version in `src-tauri/tauri.conf.json`, then attaches the installers, portable executable, and checksums to the GitHub release.
+
 <br>
 
 ## Project layout
 
 ```text
 hyperion/
+├── .github/workflows/build.yml  Windows CI and tag release assets
 ├── docs/screenshots/            README screenshots (browser mock data)
 ├── public/                      Banner, logo and app artwork
 ├── scripts/                     Logo/icon generation
