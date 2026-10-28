@@ -14,6 +14,7 @@ import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
 import { CancelDownloadDialog } from './components/CancelDownloadDialog';
 import { InstallLocationDialog } from './components/InstallLocationDialog';
+import { LauncherUpdateDialog } from './components/LauncherUpdateDialog';
 import {
   AppSettings,
   DownloadProgress,
@@ -28,6 +29,7 @@ import {
   authLogout,
   authResumeSession,
   catalogGetGames,
+  checkLauncherUpdate,
   gameAdoptRunning,
   gameCancelDownload,
   gameGetAllDownloads,
@@ -38,10 +40,12 @@ import {
   gameResumeDownload,
   gameStop,
   gameUninstall,
+  installLauncherUpdate,
   launchMysticLauncher,
   listenToDownloadProgress,
   mysticLauncherStatus,
   openPath,
+  type LauncherUpdate,
   settingsGet,
   settingsSave,
   steamClearCredentials,
@@ -123,6 +127,13 @@ export const App: React.FC = () => {
   // Steam connected but the local library scan is off -> titles are hidden
   const [steamLibraryHint, setSteamLibraryHint] = useState<AppSettings | null>(null);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  // Signed launcher update returned by the Tauri updater, if one is waiting.
+  const [availableUpdate, setAvailableUpdate] = useState<LauncherUpdate | null>(null);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateDownloaded, setUpdateDownloaded] = useState(0);
+  const [updateTotal, setUpdateTotal] = useState(0);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const autoUpdateChecked = useRef(false);
   // Active download awaiting destructive-cancel confirmation.
   const [cancelCandidate, setCancelCandidate] = useState<DownloadProgress | null>(null);
   const [isCancellingDownload, setIsCancellingDownload] = useState(false);
@@ -137,6 +148,84 @@ export const App: React.FC = () => {
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 4000);
+  };
+
+  const checkForLauncherUpdate = async (manual = false) => {
+    try {
+      const update = await checkLauncherUpdate();
+      if (update) {
+        setAvailableUpdate((current) => {
+          if (current && current !== update) {
+            void current.close().catch(() => {});
+          }
+          return update;
+        });
+        setUpdateError(null);
+        setUpdateDownloaded(0);
+        setUpdateTotal(0);
+      } else if (manual) {
+        showNotification('Hyperion is already up to date.', 'success');
+      }
+    } catch (e: any) {
+      console.warn('Launcher update check failed:', e);
+      if (manual) {
+        showNotification('Could not check for launcher updates. Try again later.', 'error');
+      }
+    }
+  };
+
+  useEffect(() => {
+    const timer = window.setTimeout(async () => {
+      if (autoUpdateChecked.current) return;
+      autoUpdateChecked.current = true;
+      try {
+        const settings = await settingsGet();
+        if (settings.auto_update_launcher) {
+          await checkForLauncherUpdate(false);
+        }
+      } catch (e) {
+        console.warn('Could not read the launcher update preference:', e);
+      }
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const handleInstallLauncherUpdate = async () => {
+    if (!availableUpdate || isInstallingUpdate) return;
+
+    setIsInstallingUpdate(true);
+    setUpdateError(null);
+    setUpdateDownloaded(0);
+    setUpdateTotal(0);
+    let total = 0;
+    let downloaded = 0;
+
+    try {
+      await installLauncherUpdate(availableUpdate, (event) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength ?? 0;
+          setUpdateTotal(total);
+        } else if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          setUpdateDownloaded(downloaded);
+        } else if (event.event === 'Finished') {
+          setUpdateDownloaded(total);
+        }
+      });
+    } catch (e: any) {
+      console.error('Launcher update failed:', e);
+      setUpdateError(e?.toString() || 'The update could not be installed.');
+      setIsInstallingUpdate(false);
+    }
+  };
+
+  const dismissLauncherUpdate = () => {
+    if (isInstallingUpdate) return;
+    void availableUpdate?.close().catch(() => {});
+    setAvailableUpdate(null);
+    setUpdateDownloaded(0);
+    setUpdateTotal(0);
+    setUpdateError(null);
   };
 
   // The featured card opens Mystic Paradox's own launcher. Re-check when the
@@ -1122,7 +1211,10 @@ export const App: React.FC = () => {
           )}
 
           {activeTab === 'settings' && (
-            <SettingsView onSettingsSaved={() => loadGames(false)} />
+            <SettingsView
+              onSettingsSaved={() => loadGames(false)}
+              onCheckForUpdates={() => checkForLauncherUpdate(true)}
+            />
           )}
 
           {activeTab === 'about' && <AboutView />}
@@ -1195,6 +1287,23 @@ export const App: React.FC = () => {
           onSubmit={handleSteamAuthSubmit}
         />
       )}
+      {/* Signed launcher update available */}
+      {availableUpdate && (
+        <LauncherUpdateDialog
+          version={availableUpdate.version}
+          currentVersion={availableUpdate.currentVersion}
+          notes={availableUpdate.body}
+          date={availableUpdate.date}
+          busy={isInstallingUpdate}
+          downloadedBytes={updateDownloaded}
+          totalBytes={updateTotal}
+          error={updateError}
+          hasActiveWork={activeDownloadsList.length > 0 || runningGamesList.length > 0}
+          onInstall={() => void handleInstallLauncherUpdate()}
+          onClose={dismissLauncherUpdate}
+        />
+      )}
+
       {/* Ask for a folder before starting a normal game download */}
       {installPromptGame && (
         <InstallLocationDialog

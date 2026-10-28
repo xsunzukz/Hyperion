@@ -37,3 +37,10 @@ desktop.ini
 
 # Crash dumps / symbols
 *.pdb
+
+# Tauri updater signing keys
+.secrets/
+
+# Wrangler local state
+.wrangler/
+**/.wrangler/

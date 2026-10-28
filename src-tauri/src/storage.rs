@@ -332,6 +332,7 @@ impl Storage {
                 "throttle_mbps" => settings.throttle_mbps = val.parse().unwrap_or(0),
                 "language" => settings.language = val,
                 "auto_update" => settings.auto_update = val == "true",
+                "auto_update_launcher" => settings.auto_update_launcher = val == "true",
                 "skip_update_check" => settings.skip_update_check = val == "true",
                 "platform" => settings.platform = val,
                 "steam_account" => settings.steam_account = if val.is_empty() { None } else { Some(val) },
@@ -356,6 +357,10 @@ impl Storage {
             ("throttle_mbps", settings.throttle_mbps.to_string()),
             ("language", settings.language.clone()),
             ("auto_update", settings.auto_update.to_string()),
+            (
+                "auto_update_launcher",
+                settings.auto_update_launcher.to_string(),
+            ),
             ("skip_update_check", settings.skip_update_check.to_string()),
             ("platform", settings.platform.clone()),
             ("steam_account", settings.steam_account.clone().unwrap_or_default()),

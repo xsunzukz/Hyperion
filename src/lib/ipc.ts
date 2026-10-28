@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import {
   AppSettings,
   BootstrapProgress,
@@ -165,6 +167,7 @@ let mockSettings: AppSettings = {
   throttle_mbps: 0,
   language: 'en',
   auto_update: true,
+  auto_update_launcher: true,
   skip_update_check: false,
   platform: 'Windows',
   steam_library_scan: false,
@@ -523,6 +526,28 @@ export const diagnosticsGet = async (): Promise<SystemDiagnostics> => {
     app_version: '1.0.3',
     rust_version: '1.97.1',
   };
+};
+
+export type LauncherUpdate = Update;
+export type LauncherUpdateEvent = DownloadEvent;
+
+export const checkLauncherUpdate = async (): Promise<LauncherUpdate | null> => {
+  if (!isTauri()) {
+    return null;
+  }
+  return check({ timeout: 15_000 });
+};
+
+export const installLauncherUpdate = async (
+  update: LauncherUpdate,
+  onEvent?: (event: LauncherUpdateEvent) => void
+): Promise<void> => {
+  if (!isTauri()) {
+    return;
+  }
+  await update.downloadAndInstall(onEvent, { restartAfterInstall: true });
+  // Windows exits after launching the installer; other platforms need this.
+  await relaunch();
 };
 
 export const mysticLauncherStatus = async (): Promise<MysticLauncherStatus> => {

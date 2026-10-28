@@ -8,6 +8,7 @@ import {
   Globe,
   CheckCircle2,
   Minimize2,
+  RefreshCw,
 } from 'lucide-react';
 import { AppSettings } from '../types';
 import { selectDirectory, settingsGet, settingsSave } from '../lib/ipc';
@@ -15,12 +16,18 @@ import { selectDirectory, settingsGet, settingsSave } from '../lib/ipc';
 interface SettingsViewProps {
   /** Lets the shell reload the library after preferences change */
   onSettingsSaved?: (settings: AppSettings) => void;
+  /** Opens the signed launcher update check and its result dialog */
+  onCheckForUpdates?: () => Promise<void> | void;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ onSettingsSaved }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({
+  onSettingsSaved,
+  onCheckForUpdates,
+}) => {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   useEffect(() => {
     const fetch = async () => {
@@ -57,6 +64,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSettingsSaved }) =
       onSettingsSaved?.(settings);
     } catch (e) {
       console.error('Failed to save settings:', e);
+    }
+  };
+
+  const handleCheckUpdates = async () => {
+    if (!onCheckForUpdates || checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      await onCheckForUpdates();
+    } finally {
+      setCheckingUpdate(false);
     }
   };
 
@@ -268,6 +285,72 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSettingsSaved }) =
                   settings.close_to_tray ? 'translate-x-6' : 'translate-x-1'
                 }`}
               />
+            </button>
+          </div>
+        </div>
+
+        {/* Launcher updates */}
+        <div className="p-6 rounded-2xl glass-panel border border-zinc-800/80 bg-zinc-950/80 space-y-4">
+          <label className="flex items-center gap-2 text-sm font-bold text-white">
+            <RefreshCw className="w-4 h-4 text-orange-400" />
+            <span>Launcher Updates</span>
+          </label>
+
+          <div className="flex items-start justify-between gap-5 pt-1">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-zinc-200">
+                Automatically check for launcher updates
+              </div>
+              <p className="mt-1 max-w-lg text-xs leading-relaxed text-zinc-400">
+                At launch, Hyperion checks the signed update feed. If a newer version exists,
+                you&rsquo;ll see its notes and choose when to install and restart.
+              </p>
+              <p className="mt-2 text-[11px] text-zinc-500">
+                {settings.auto_update_launcher
+                  ? 'Automatic checks are on.'
+                  : 'Automatic checks are off. You can still check manually.'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.auto_update_launcher}
+              aria-label="Automatically check for launcher updates"
+              onClick={() =>
+                setSettings({
+                  ...settings,
+                  auto_update_launcher: !settings.auto_update_launcher,
+                })
+              }
+              className={`relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/60 ${
+                settings.auto_update_launcher
+                  ? 'border-orange-400/50 bg-orange-500/80'
+                  : 'border-zinc-700 bg-zinc-800'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white shadow-md transition-transform ${
+                  settings.auto_update_launcher ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800/80 pt-3">
+            <p className="text-[11px] text-zinc-500">
+              Updates are signed and served from GitHub Releases.
+            </p>
+            <button
+              type="button"
+              onClick={handleCheckUpdates}
+              disabled={checkingUpdate}
+              className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-[11px] font-bold text-zinc-200 transition hover:border-orange-500/40 hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 text-orange-400 ${checkingUpdate ? 'animate-spin' : ''}`}
+              />
+              <span>{checkingUpdate ? 'Checking...' : 'Check for Updates'}</span>
             </button>
           </div>
         </div>

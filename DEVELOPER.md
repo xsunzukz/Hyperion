@@ -53,10 +53,37 @@ Settings are stored as key/value rows in SQLite and returned as `AppSettings`. S
 | Setting | Default | Behavior |
 |---|---|---|
 | `default_install_dir` | detected drive | Base folder for new installs. The install-location prompt can update it when **Remember this as my default install location** is ticked. |
+| `auto_update_launcher` | `true` | Check the signed launcher update feed at startup. A found update is shown in a prompt; it is never installed without confirmation. |
 | `steam_library_scan` | `false` | Reads Steam's local library files to list installed/owned Steam games. Opt-in because antivirus engines can object to launchers reading those files. |
 | `close_to_tray` | `true` | When the window's close button is pressed, hide to the system tray and keep downloads/games running. When `false`, the close is not prevented and the process exits normally. |
 
 Normal game installs go through the install-location prompt first; the chosen folder is passed to `game_install` as `install_dir`, and the backend still adds a per-game folder when the selected path is a library root. `close_to_tray` is read from storage inside `WindowEvent::CloseRequested` in `src-tauri/src/lib.rs`, so changing it in Settings affects the next close without restarting.
+
+<br>
+
+## Launcher updates
+
+The updater is deliberately split into three small pieces:
+
+1. **Signing**: `tauri-plugin-updater` verifies a minisign signature before installing. The public key lives in `src-tauri/tauri.conf.json`; the private key and password are stored in `.secrets/` locally (gitignored) and must be added to GitHub Actions as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+2. **Manifest**: a tagged CI build signs the NSIS installer and creates `latest.json` with the version, notes, signature, and GitHub asset URL. The signature and manifest are uploaded with the release.
+3. **Delivery**: the Cloudflare Worker in `cloudflare/updater-worker/` proxies `releases/latest/download/latest.json` with a five-minute cache. Its deployed endpoint is:
+
+   `https://hyperion-updater.rainfalls.workers.dev/latest.json`
+
+The app checks that endpoint about 2.5 seconds after launch when `auto_update_launcher` is on. The update dialog shows release notes and progress, warns if downloads or games are active, and only installs/restarts when the user chooses **Install and Restart**.
+
+The first updater-capable build is **1.0.3**; older versions must be updated manually once. Later releases update from this feed.
+
+Local updater builds use the overlay:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .secrets/hyperion-updater.key -Raw
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content .secrets/hyperion-updater-password.txt -Raw
+npm run tauri build -- --config src-tauri/tauri.updater.conf.json
+```
+
+Normal `npm run tauri build` builds the app without updater artifacts, so CI on `main` and pull requests does not need the signing secret.
 
 <br>
 
@@ -187,7 +214,9 @@ The screenshots in `docs/screenshots/` are captured from the browser preview, so
 4. create a portable `Hyperion_<version>_standalone.exe` and a `SHA256SUMS.txt`;
 5. upload the artifacts for 14 days.
 
-On a `v*` tag, the workflow first verifies that the tag matches the version in `src-tauri/tauri.conf.json`, then attaches the installers, portable executable, and checksums to the GitHub release.
+On a `v*` tag, the workflow first verifies that the tag matches the version in `src-tauri/tauri.conf.json`. It then builds with `src-tauri/tauri.updater.conf.json`, signs the NSIS installer using `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, generates `latest.json`, and attaches the installers, portable executable, signature, manifest, and checksums to the GitHub release. The Cloudflare Worker then serves the release's latest manifest.
+
+Add both signing values under **GitHub → Settings → Secrets and variables → Actions** before pushing a release tag. Without them, tagged builds fail before publishing; normal `main` and pull-request builds do not need the keys.
 
 <br>
 
@@ -196,13 +225,15 @@ On a `v*` tag, the workflow first verifies that the tag matches the version in `
 ```text
 hyperion/
 ├── .github/workflows/build.yml  Windows CI and tag release assets
+├── cloudflare/updater-worker/   Signed update manifest proxy
 ├── docs/screenshots/            README screenshots (browser mock data)
 ├── public/                      Banner, logo and app artwork
 ├── scripts/                     Logo/icon generation
 ├── src/                         React 19 + TypeScript frontend
 │   ├── components/              Sidebar, Header, GameCard, GameDetailModal, DownloadsView,
-│   │                            AccountView, InstallLocationDialog, CancelDownloadDialog,
-│   │                            CustomManifestModal, CloudSavesView, SettingsView, LoginModal …
+│   │                            AccountView, InstallLocationDialog, LauncherUpdateDialog,
+│   │                            CancelDownloadDialog, CustomManifestModal, CloudSavesView,
+│   │                            SettingsView, LoginModal …
 │   ├── lib/ipc.ts               Typed Tauri IPC + browser mock fallback
 │   ├── assets/                  Sponsor artwork
 │   └── App.tsx                  Layout, account/session state and download orchestration

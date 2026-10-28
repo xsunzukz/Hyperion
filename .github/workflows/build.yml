@@ -58,7 +58,19 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build Windows bundles
-        run: npm run tauri build
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+              throw "TAURI_SIGNING_PRIVATE_KEY is not configured for this repository."
+            }
+            npm run tauri build -- --config src-tauri/tauri.updater.conf.json
+          } else {
+            npm run tauri build
+          }
 
       - name: Prepare portable build and checksums
         shell: pwsh
@@ -69,9 +81,11 @@ jobs:
           $standalone = Join-Path $target "Hyperion_${version}_standalone.exe"
           Copy-Item -LiteralPath (Join-Path $target "hyperion.exe") -Destination $standalone -Force
 
-          $setup = Get-ChildItem (Join-Path $target "bundle/nsis") -Filter "*.exe" |
+          $setup = Get-ChildItem (Join-Path $target "bundle/nsis") `
+            -Filter "Hyperion_${version}_x64-setup.exe" |
             Select-Object -First 1
-          $msi = Get-ChildItem (Join-Path $target "bundle/msi") -Filter "*.msi" |
+          $msi = Get-ChildItem (Join-Path $target "bundle/msi") `
+            -Filter "Hyperion_${version}_*.msi" |
             Select-Object -First 1
 
           if (-not $setup -or -not $msi) {
@@ -85,6 +99,51 @@ jobs:
           $lines | Set-Content -LiteralPath (Join-Path $target "SHA256SUMS.txt") -Encoding ascii
           $lines
 
+      - name: Prepare updater manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $target = "src-tauri/target/release"
+          $setup = Get-ChildItem (Join-Path $target "bundle/nsis") `
+            -Filter "Hyperion_${version}_x64-setup.exe" |
+            Select-Object -First 1
+          if (-not $setup) {
+            throw "The NSIS updater installer was not produced."
+          }
+
+          $signaturePath = "$($setup.FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath)) {
+            throw "Missing updater signature: $signaturePath"
+          }
+          $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          if (-not $signature) {
+            throw "The updater signature is empty."
+          }
+
+          $download = "https://github.com/xsunzukz/Hyperion/releases/download/v$version/$([uri]::EscapeDataString($setup.Name))"
+          $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $manifest = [ordered]@{
+            version = $version
+            notes = "Hyperion $version is available. See the release page for the full changelog."
+            pub_date = $pubDate
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = $download
+              }
+            }
+          }
+
+          $json = $manifest | ConvertTo-Json -Depth 6
+          $latestPath = Join-Path $target "latest.json"
+          [System.IO.File]::WriteAllText(
+            $latestPath,
+            $json,
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+          Get-Content -LiteralPath $latestPath
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -94,8 +153,10 @@ jobs:
           path: |
             src-tauri/target/release/Hyperion_*_standalone.exe
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/SHA256SUMS.txt
+            src-tauri/target/release/latest.json
 
       - name: Attach assets to GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -109,7 +170,9 @@ jobs:
           files: |
             src-tauri/target/release/Hyperion_*_standalone.exe
             src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/SHA256SUMS.txt
+            src-tauri/target/release/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

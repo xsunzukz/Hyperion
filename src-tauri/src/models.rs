@@ -230,6 +230,10 @@ fn default_close_to_tray() -> bool {
     true
 }
 
+fn default_auto_update_launcher() -> bool {
+    true
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -238,6 +242,10 @@ pub struct AppSettings {
     pub throttle_mbps: u32,
     pub language: String,
     pub auto_update: bool,
+    /// Check the signed updater endpoint on launch and prompt when a newer
+    /// Hyperion is available. The update itself still needs confirmation.
+    #[serde(default = "default_auto_update_launcher")]
+    pub auto_update_launcher: bool,
     pub skip_update_check: bool,
     pub platform: String,
     #[serde(default)]
@@ -281,6 +289,7 @@ impl Default for AppSettings {
             throttle_mbps: 0,
             language: "en".to_string(),
             auto_update: true,
+            auto_update_launcher: true,
             skip_update_check: false,
             platform: "Windows".to_string(),
             steam_account: None,

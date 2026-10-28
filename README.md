@@ -71,7 +71,7 @@ Every download asks where it should go, and you can remember that folder as your
 
 ### 🖥️ Built to stay out of the way
 
-A native Rust core and a fast, quiet interface. Close the window and downloads keep moving in the system tray — or turn that off in Settings.
+A native Rust core and a fast, quiet interface. Close the window and downloads keep moving in the system tray — or turn that off in Settings. Signed launcher updates check in the background and only restart when you choose.
 
 </td>
 <td width="50%" valign="top">
@@ -114,7 +114,7 @@ Your Epic profile, Steam sign-in, Steam library scan and sign-out now live toget
 <td width="50%">
   <img src="docs/screenshots/settings.png" alt="Hyperion settings" width="100%">
   <br>
-  <sub><b>Settings</b> — worker count, install folder, language and tray behavior.</sub>
+  <sub><b>Settings</b> — worker count, install folder, language, tray behavior and launcher updates.</sub>
 </td>
 </tr>
 </table>
@@ -140,6 +140,8 @@ Steam is optional. You only need it for Steam titles and in-app Steam downloads;
 
 > [!TIP]
 > By default, closing the window keeps Hyperion running in the system tray so downloads finish. Prefer a normal exit? Turn off **Settings → Window & Tray → Close app to minimize to system tray**.
+
+Hyperion checks for signed launcher updates at launch when **Settings → Launcher Updates** is enabled. You always see the new version, its notes, and choose when to install and restart.
 
 <br>
 
@@ -168,6 +170,7 @@ Hyperion is a client, not a store and not a DRM bypass. It signs in to **your** 
 - No account snooping: Hyperion never reads the Steam client's saved logins or browser data.
 - No shell commands or process injection. Games are stopped through the Windows API, not `taskkill`.
 - Your Epic token goes only to Epic. Steam credentials go only to Valve's SteamCMD.
+- Launcher updates are signed and verified before installation.
 - Uninstall deletes only the files the game's manifest lists — saves and mods you added stay.
 
 > [!IMPORTANT]

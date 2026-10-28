@@ -147,6 +147,8 @@ export interface AppSettings {
   throttle_mbps: number;
   language: string;
   auto_update: boolean;
+  /** Check the signed launcher updater on launch and show a prompt */
+  auto_update_launcher: boolean;
   skip_update_check: boolean;
   platform: string;
   steam_account?: string;

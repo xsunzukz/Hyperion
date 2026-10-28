@@ -1,0 +1,4 @@
+name = "hyperion-updater"
+main = "src/index.js"
+compatibility_date = "2026-10-28"
+workers_dev = true
