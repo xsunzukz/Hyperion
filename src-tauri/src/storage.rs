@@ -1,9 +1,25 @@
 use crate::error::Result;
 use crate::models::{AppSettings, InstalledGame, Session};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Prefix of a `session_json` value sealed with Windows DPAPI
+const SEALED_SESSION_PREFIX: &str = "dpapi:";
+
+/// Seals the Epic session for the disk. DPAPI binds it to the current Windows
+/// user, so a copied `hyperion.db` does not carry a usable sign-in.
+#[cfg(target_os = "windows")]
+fn seal_session(json: &str) -> Result<String> {
+    Ok(format!("{}{}", SEALED_SESSION_PREFIX, crate::secret::encrypt(json)?))
+}
+
+/// No OS key store is wired up off Windows; the session is kept as JSON
+#[cfg(not(target_os = "windows"))]
+fn seal_session(json: &str) -> Result<String> {
+    Ok(json.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub struct CachedCatalogItem {
@@ -28,6 +44,9 @@ impl Storage {
 
         info!("Opening database at {}", db_path.display());
         let conn = Connection::open(&db_path)?;
+        // Deleted rows are zeroed, so a replaced or signed-out session leaves
+        // no readable copy behind in the file's free space
+        conn.pragma_update(None, "secure_delete", true)?;
         let storage = Self {
             conn: Mutex::new(conn),
             db_path,
@@ -385,34 +404,64 @@ impl Storage {
 
     // Auth State storage
     pub fn save_session(&self, session: &Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let session_json = serde_json::to_string(session)?;
+        let session_json = seal_session(&serde_json::to_string(session)?)?;
         let display_name = session
             .display_name
             .clone()
             .unwrap_or_else(|| "User".to_string());
-        let refresh_token = session.refresh_token.clone().unwrap_or_default();
 
+        // The refresh token lives only inside the sealed JSON; its old column stays empty
+        let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
             INSERT OR REPLACE INTO auth_state (id, account_id, display_name, refresh_token, session_json, updated_at)
-            VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            VALUES (1, ?1, ?2, '', ?3, CURRENT_TIMESTAMP)
             "#,
-            params![session.account_id, display_name, refresh_token, session_json],
+            params![session.account_id, display_name, session_json],
         )?;
         Ok(())
     }
 
     pub fn get_saved_session(&self) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT session_json FROM auth_state WHERE id = 1")?;
-        let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            let json_str: String = row.get(0)?;
-            let session: Session = serde_json::from_str(&json_str)?;
-            Ok(Some(session))
-        } else {
-            Ok(None)
+        let stored: Option<String> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT session_json FROM auth_state WHERE id = 1", [], |row| row.get(0))
+            .optional()?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+
+        let Some(sealed) = stored.strip_prefix(SEALED_SESSION_PREFIX) else {
+            // Builds before sealing wrote plain JSON: seal it now, then rebuild
+            // the file so no earlier copy of a token is left in its free pages
+            let session: Session = serde_json::from_str(&stored)?;
+            if cfg!(target_os = "windows") {
+                match self.save_session(&session) {
+                    Ok(()) => {
+                        info!("Sealed the saved Epic session with DPAPI");
+                        if let Err(e) = self.conn.lock().unwrap().execute_batch("VACUUM") {
+                            warn!("Could not rebuild the database after sealing: {}", e);
+                        }
+                    }
+                    Err(e) => warn!("Could not seal the saved Epic session: {}", e),
+                }
+            }
+            return Ok(Some(session));
+        };
+
+        let opened = crate::secret::decrypt(sealed)
+            .and_then(|json| Ok(serde_json::from_str::<Session>(&json)?));
+        match opened {
+            Ok(session) => Ok(Some(session)),
+            Err(e) => {
+                // Sealed for another PC or Windows user (a copied database), so
+                // ask for a sign-in instead of failing on every start
+                warn!("Saved Epic session could not be unsealed ({}), clearing it", e);
+                self.clear_session()?;
+                Ok(None)
+            }
         }
     }
 

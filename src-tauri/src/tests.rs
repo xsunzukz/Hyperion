@@ -258,6 +258,133 @@ mod tests {
         assert!(storage.get_saved_session().unwrap().is_none());
     }
 
+    fn sample_session() -> Session {
+        Session {
+            access_token: "sample_access_token".to_string(),
+            expires_in: 3600,
+            expires_at: Some("2026-10-20T12:00:00Z".to_string()),
+            token_type: "bearer".to_string(),
+            refresh_token: Some("sample_refresh_token".to_string()),
+            refresh_expires: Some(7200),
+            refresh_expires_at: None,
+            account_id: "acc_12345".to_string(),
+            client_id: None,
+            internal_client: None,
+            client_service: None,
+            display_name: Some("TestGamer".to_string()),
+            app: None,
+            in_sub: None,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn epic_session_is_sealed_on_disk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("sealed.db");
+        let storage = Storage::new(&db_path).unwrap();
+        storage.save_session(&sample_session()).unwrap();
+
+        // Neither column holds a readable token
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let (refresh, json): (String, String) = conn
+                .query_row(
+                    "SELECT refresh_token, session_json FROM auth_state WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert!(refresh.is_empty());
+            assert!(json.starts_with("dpapi:"));
+            assert!(!json.contains("sample_access_token"));
+            assert!(!json.contains("sample_refresh_token"));
+        }
+
+        let loaded = storage.get_saved_session().unwrap().expect("session restored");
+        assert_eq!(loaded.access_token, "sample_access_token");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("sample_refresh_token"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn plaintext_epic_session_from_older_builds_is_sealed_and_scrubbed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("legacy.db");
+        drop(Storage::new(&db_path).unwrap());
+
+        // Written the way builds before sealing did, renewed a few times. Real
+        // tokens are long enough to spill into overflow pages, and a replaced
+        // row's overflow pages go to the free list with the old token intact.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "secure_delete", false).unwrap();
+            for n in 0..3 {
+                let mut session = sample_session();
+                session.access_token = if n == 0 {
+                    "legacy_access_token_0 ".repeat(500)
+                } else {
+                    format!("legacy_access_token_{}", n)
+                };
+                session.refresh_token = Some(format!("legacy_refresh_token_{}", n));
+                conn.execute(
+                    "INSERT OR REPLACE INTO auth_state (id, account_id, display_name, refresh_token, session_json)
+                     VALUES (1, ?1, 'TestGamer', ?2, ?3)",
+                    rusqlite::params![
+                        session.account_id,
+                        session.refresh_token,
+                        serde_json::to_string(&session).unwrap()
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let before = std::fs::read(&db_path).unwrap();
+        assert!(
+            String::from_utf8_lossy(&before).contains("legacy_access_token_0"),
+            "the old file should still hold a replaced token"
+        );
+
+        // Still signed in after the update
+        let storage = Storage::new(&db_path).unwrap();
+        let loaded = storage.get_saved_session().unwrap().expect("legacy session kept");
+        assert_eq!(loaded.refresh_token.as_deref(), Some("legacy_refresh_token_2"));
+        drop(storage);
+
+        // No copy of any token, current or replaced, is left in the file
+        let bytes = std::fs::read(&db_path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("legacy_access_token"));
+        assert!(!text.contains("legacy_refresh_token"));
+
+        // And the sealed copy opens on the next start
+        let storage = Storage::new(&db_path).unwrap();
+        let reopened = storage.get_saved_session().unwrap().expect("sealed session restored");
+        assert_eq!(reopened.access_token, "legacy_access_token_2");
+    }
+
+    #[test]
+    fn epic_session_sealed_for_another_user_is_cleared() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("foreign.db");
+        let storage = Storage::new(&db_path).unwrap();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO auth_state (id, account_id, display_name, refresh_token, session_json)
+             VALUES (1, 'acc_12345', 'TestGamer', '', 'dpapi:bm90LWEtZHBhcGktYmxvYg==')",
+            [],
+        )
+        .unwrap();
+
+        // A sign-in prompt, not an error on every start
+        assert!(storage.get_saved_session().unwrap().is_none());
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM auth_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
     #[test]
     fn test_cloud_save_path_resolution() {
         let game = InstalledGame {
