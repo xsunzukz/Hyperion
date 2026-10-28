@@ -13,6 +13,7 @@ import { LoginGate } from './components/LoginGate';
 import { CustomManifestModal } from './components/CustomManifestModal';
 import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
 import { CancelDownloadDialog } from './components/CancelDownloadDialog';
+import { InstallLocationDialog } from './components/InstallLocationDialog';
 import {
   AppSettings,
   DownloadProgress,
@@ -107,10 +108,13 @@ export const App: React.FC = () => {
   const [customManifestGame, setCustomManifestGame] = useState<GameItem | null>(null);
   // Manifest URL pre-filled into the Direct Downloader (e.g. when retrying the featured build)
   const [customManifestUrl, setCustomManifestUrl] = useState<string | null>(null);
+  // Game waiting for the user to pick an install folder.
+  const [installPromptGame, setInstallPromptGame] = useState<GameItem | null>(null);
   const [steamAuthRequest, setSteamAuthRequest] = useState<{
     mode: 'full' | 'guard';
     appName: string;
     title: string;
+    installDir?: string;
   } | null>(null);
   const [steamUsernameHint, setSteamUsernameHint] = useState<string | undefined>(undefined);
   // Bumped after a successful Steam sign-in so settings / downloader panels refresh
@@ -330,6 +334,8 @@ export const App: React.FC = () => {
   const loadSeq = useRef(0);
   const appliedSeq = useRef(0);
   const loadsInFlight = useRef(0);
+  // Remember the chosen folder for Steam Guard prompts that arrive later.
+  const installDirsRef = useRef<Record<string, string>>({});
   const loadGames = async (forceRefresh = false) => {
     const seq = ++loadSeq.current;
     loadsInFlight.current += 1;
@@ -355,7 +361,12 @@ export const App: React.FC = () => {
   }, [user, sessionChecked]);
 
   // Opens the in-app Steam sign-in prompt and remembers which download to resume
-  const requestSteamAuth = async (mode: 'full' | 'guard', appName: string, title: string) => {
+  const requestSteamAuth = async (
+    mode: 'full' | 'guard',
+    appName: string,
+    title: string,
+    installDir?: string
+  ) => {
     if (mode === 'full') {
       try {
         const status = await steamGetAuthStatus();
@@ -364,7 +375,7 @@ export const App: React.FC = () => {
         setSteamUsernameHint(undefined);
       }
     }
-    setSteamAuthRequest({ mode, appName, title });
+    setSteamAuthRequest({ mode, appName, title, installDir });
   };
 
   // Listen to live Tauri download progress events
@@ -383,11 +394,11 @@ export const App: React.FC = () => {
         // or report that the stored password was rejected.
         const err = p.error_message || '';
         if (p.status === 'Failed' && err.startsWith('STEAM_GUARD_REQUIRED')) {
-          requestSteamAuth('guard', p.app_name, p.title);
+          requestSteamAuth('guard', p.app_name, p.title, installDirsRef.current[p.app_name]);
         } else if (p.status === 'Failed' && err.startsWith('STEAM_LOGIN_FAILED')) {
           // Drop the rejected session so the prompt starts from a clean slate
           steamClearCredentials().catch(() => {});
-          requestSteamAuth('full', p.app_name, p.title);
+          requestSteamAuth('full', p.app_name, p.title, installDirsRef.current[p.app_name]);
         }
       });
     };
@@ -499,9 +510,10 @@ export const App: React.FC = () => {
     setSelectedGame(null);
   };
 
-  const requestGameInstall = async (appName: string, title: string) => {
+  const requestGameInstall = async (appName: string, title: string, installDir?: string) => {
+    if (installDir) installDirsRef.current[appName] = installDir;
     try {
-      await gameInstall(appName);
+      await gameInstall(appName, installDir);
 
       // The backend has accepted the job; the first progress event usually
       // lands moments later, but do not leave the row at "Queued" if it is slow.
@@ -524,7 +536,7 @@ export const App: React.FC = () => {
           return next;
         });
         showNotification(`Sign in to Steam to download ${title} in-app`, 'info');
-        await requestSteamAuth('full', appName, title);
+        await requestSteamAuth('full', appName, title, installDir);
         return false;
       }
 
@@ -543,7 +555,18 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleInstall = async (game: GameItem) => {
+  const startGameInstall = async (game: GameItem, installDir: string) => {
+    queueDownload(game.app_name, game.title, game.install_size || 0);
+    showNotification(
+      game.platform === 'steam'
+        ? `Preparing in-app download for ${game.title}`
+        : `Queued download for ${game.title}`,
+      'info'
+    );
+    await requestGameInstall(game.app_name, game.title, installDir);
+  };
+
+  const handleInstall = (game: GameItem) => {
     // Dauntless installs from the community build, never Epic's delisted one
     if (game.app_name === SPONSOR_APP_NAME) {
       handleSponsorInstall();
@@ -557,14 +580,16 @@ export const App: React.FC = () => {
       return;
     }
 
-    queueDownload(game.app_name, game.title, game.install_size || 0);
-    showNotification(
-      game.platform === 'steam'
-        ? `Preparing in-app download for ${game.title}`
-        : `Queued download for ${game.title}`,
-      'info'
-    );
-    await requestGameInstall(game.app_name, game.title);
+    // Ask where this game should go before creating the queue entry.
+    setInstallPromptGame(game);
+  };
+
+  const handleInstallLocationConfirm = async (installDir: string) => {
+    const game = installPromptGame;
+    setInstallPromptGame(null);
+    if (game) {
+      await startGameInstall(game, installDir);
+    }
   };
 
   const handleSteamAuthSubmit = async (data: {
@@ -611,7 +636,11 @@ export const App: React.FC = () => {
     }
 
     queueDownload(request.appName, request.title);
-    const started = await requestGameInstall(request.appName, request.title);
+    const started = await requestGameInstall(
+      request.appName,
+      request.title,
+      request.installDir
+    );
     if (started) {
       showNotification(
         request.mode === 'guard'
@@ -1166,6 +1195,15 @@ export const App: React.FC = () => {
           onSubmit={handleSteamAuthSubmit}
         />
       )}
+      {/* Ask for a folder before starting a normal game download */}
+      {installPromptGame && (
+        <InstallLocationDialog
+          title={installPromptGame.title}
+          onConfirm={handleInstallLocationConfirm}
+          onClose={() => setInstallPromptGame(null)}
+        />
+      )}
+
       {/* Destructive confirmation for stopping an active download */}
       {cancelCandidate && (
         <CancelDownloadDialog

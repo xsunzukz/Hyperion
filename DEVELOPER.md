@@ -48,14 +48,15 @@ The frontend is deliberately thin around the download engine: it starts an insta
 
 The shell renders immediately. On mount, `app_bootstrap(false)` runs in the background to warm the catalog and check SteamCMD state; there is no blocking splash screen. The library request waits only for the saved Epic session check, so the first catalog read already knows whether the account is signed in.
 
-Settings are stored as key/value rows in SQLite and returned as `AppSettings`. Two settings worth knowing about:
+Settings are stored as key/value rows in SQLite and returned as `AppSettings`. Settings worth knowing about:
 
 | Setting | Default | Behavior |
 |---|---|---|
+| `default_install_dir` | detected drive | Base folder for new installs. The install-location prompt can update it when **Remember this as my default install location** is ticked. |
 | `steam_library_scan` | `false` | Reads Steam's local library files to list installed/owned Steam games. Opt-in because antivirus engines can object to launchers reading those files. |
 | `close_to_tray` | `true` | When the window's close button is pressed, hide to the system tray and keep downloads/games running. When `false`, the close is not prevented and the process exits normally. |
 
-`close_to_tray` is read from storage inside `WindowEvent::CloseRequested` in `src-tauri/src/lib.rs`, so changing it in Settings affects the next close without restarting.
+Normal game installs go through the install-location prompt first; the chosen folder is passed to `game_install` as `install_dir`, and the backend still adds a per-game folder when the selected path is a library root. `close_to_tray` is read from storage inside `WindowEvent::CloseRequested` in `src-tauri/src/lib.rs`, so changing it in Settings affects the next close without restarting.
 
 <br>
 
@@ -200,8 +201,8 @@ hyperion/
 ├── scripts/                     Logo/icon generation
 ├── src/                         React 19 + TypeScript frontend
 │   ├── components/              Sidebar, Header, GameCard, GameDetailModal, DownloadsView,
-│   │                            AccountView, CancelDownloadDialog, CustomManifestModal,
-│   │                            CloudSavesView, SettingsView, LoginModal …
+│   │                            AccountView, InstallLocationDialog, CancelDownloadDialog,
+│   │                            CustomManifestModal, CloudSavesView, SettingsView, LoginModal …
 │   ├── lib/ipc.ts               Typed Tauri IPC + browser mock fallback
 │   ├── assets/                  Sponsor artwork
 │   └── App.tsx                  Layout, account/session state and download orchestration

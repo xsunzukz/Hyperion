@@ -62,7 +62,7 @@ Chunks are hash-checked before they reach disk. **Verify** finds the files that 
 
 ### 📁 Your installs stay yours
 
-Choose the folder. Keep your saves and mods. Uninstall removes only the game's own files — never the folder around them.
+Every download asks where it should go, and you can remember that folder as your default. Keep your saves and mods; uninstall removes only the game's own files — never the folder around them.
 
 </td>
 </tr>
@@ -121,12 +121,20 @@ Your Epic profile, Steam sign-in, Steam library scan and sign-out now live toget
 
 <br>
 
+<p align="center">
+  <img src="docs/screenshots/install-location.png" alt="Choosing where to install a game" width="100%">
+  <br>
+  <sub><b>Install location</b> — choose a folder, or remember it for future downloads.</sub>
+</p>
+
+<br>
+
 ## Get started
 
 1. **Download** `Hyperion_<version>_x64-setup.exe` from the [latest release](https://github.com/xsunzukz/Hyperion/releases/latest). Prefer no installer? Grab the `_standalone.exe`; managed machines can use the `.msi`.
 2. **Run it.** The build is not code-signed yet, so Windows SmartScreen asks first: choose **More info → Run anyway**.
 3. **Sign in with Epic.** Epic's own login page opens; Hyperion never sees your password.
-4. **Install and play.** Pick a game from your library. For the featured Dauntless build, install the game here first; once it's installed, PLAY opens the Mystic Paradox Launcher, or sends you to its releases page if the launcher isn't installed.
+4. **Install and play.** Pick a game from your library and choose where it should go; tick **Remember** to use that folder for future downloads. For the featured Dauntless build, install the game here first; once it's installed, PLAY opens the Mystic Paradox Launcher, or sends you to its releases page if the launcher isn't installed.
 
 Steam is optional. You only need it for Steam titles and in-app Steam downloads; your Epic library works without it.
 
