@@ -81,6 +81,8 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::diagnostics_get,
+            commands::mystic_launcher_status,
+            commands::launch_mystic_launcher,
             commands::open_path,
             commands::select_manifest_file,
             commands::select_directory,

@@ -126,7 +126,7 @@ Your Epic profile, Steam sign-in, Steam library scan and sign-out now live toget
 1. **Download** `Hyperion_<version>_x64-setup.exe` from the [latest release](https://github.com/xsunzukz/Hyperion/releases/latest). Prefer no installer? Grab the `_standalone.exe`; managed machines can use the `.msi`.
 2. **Run it.** The build is not code-signed yet, so Windows SmartScreen asks first: choose **More info → Run anyway**.
 3. **Sign in with Epic.** Epic's own login page opens; Hyperion never sees your password.
-4. **Install and play.** Pick a game from your library, or hit **INSTALL** on the featured Dauntless banner.
+4. **Install and play.** Pick a game from your library. For the featured Dauntless build, install the game here first; once it's installed, PLAY opens the Mystic Paradox Launcher, or sends you to its releases page if the launcher isn't installed.
 
 Steam is optional. You only need it for Steam titles and in-app Steam downloads; your Epic library works without it.
 
@@ -143,12 +143,12 @@ Steam is optional. You only need it for Steam titles and in-app Steam downloads;
 
 <br>
 
-Hyperion features the **Mystic Paradox Dauntless 1.14.7 community build** on the Discover screen.
+Hyperion features the **Mystic Paradox Launcher** on the Discover screen.
 
-- **INSTALL** opens the Direct Downloader with the build's manifest filled in and checked before anything downloads.
-- Game data comes from Epic's CDN, so **sign in with Epic first**. The download is about **15 GB**.
-- It installs under Epic's internal codename `Jackal` and appears in your library as **Dauntless**.
-- **Verify** and **Repair** work against the exact build you installed.
+- If Dauntless isn't installed, **INSTALL** downloads the 1.14.7 build through Hyperion.
+- Once the game is installed, **PLAY** opens the Mystic Paradox Launcher.
+- If the launcher isn't installed, **GET LAUNCHER** opens the [Mystic Paradox releases](https://github.com/pranav158/Mystic-Paradox/releases) page so you can download it.
+- The launcher signs in, verifies your Dauntless install, keeps the runtime current, and launches the game.
 
 <br>
 

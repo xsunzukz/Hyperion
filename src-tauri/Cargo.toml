@@ -1,6 +1,6 @@
 [package]
 name = "hyperion"
-version = "1.0.2"
+version = "1.0.3"
 description = "Hyperion - Fast native Rust game launcher for Epic Games Store"
 authors = ["Hyperion Contributors"]
 edition = "2021"

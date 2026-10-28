@@ -37,7 +37,10 @@ import {
   gameResumeDownload,
   gameStop,
   gameUninstall,
+  launchMysticLauncher,
   listenToDownloadProgress,
+  mysticLauncherStatus,
+  openPath,
   settingsGet,
   settingsSave,
   steamClearCredentials,
@@ -45,7 +48,7 @@ import {
   steamSetCredentials,
   steamSetGuardCode,
 } from './lib/ipc';
-import { Download, Gamepad2 } from 'lucide-react';
+import { Download, Gamepad2, Github, Loader2, Play } from 'lucide-react';
 import sponsorBanner from './assets/sponsor.webp';
 
 /** Featured community build published as a bare Epic manifest */
@@ -53,6 +56,7 @@ const SPONSOR_MANIFEST_URL = 'https://api.mysticfox.dev/v2/Dauntless_1.14.7.6474
 /** The app name inside that manifest: Epic's codename for Dauntless */
 const SPONSOR_APP_NAME = 'Jackal';
 const SPONSOR_TITLE = 'Dauntless';
+const MYSTIC_PARADOX_RELEASES_URL = 'https://github.com/pranav158/Mystic-Paradox/releases';
 
 /** Statuses that mean a queue entry is already in flight. */
 const LIVE_DOWNLOAD_STATUSES: DownloadProgress['status'][] = [
@@ -118,6 +122,8 @@ export const App: React.FC = () => {
   // Active download awaiting destructive-cancel confirmation.
   const [cancelCandidate, setCancelCandidate] = useState<DownloadProgress | null>(null);
   const [isCancellingDownload, setIsCancellingDownload] = useState(false);
+  // `null` while the first detection runs; false opens GitHub instead.
+  const [mysticLauncherInstalled, setMysticLauncherInstalled] = useState<boolean | null>(null);
   // Wait for the saved session check before loading the library, so the first
   // request already knows whether Epic is signed in.
   const [sessionChecked, setSessionChecked] = useState(false);
@@ -128,6 +134,66 @@ export const App: React.FC = () => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 4000);
   };
+
+  // The featured card opens Mystic Paradox's own launcher. Re-check when the
+  // window regains focus so installing it while the browser is open updates
+  // the button without restarting Hyperion.
+  const refreshMysticLauncher = async (): Promise<boolean> => {
+    try {
+      const status = await mysticLauncherStatus();
+      setMysticLauncherInstalled(status.installed);
+      return status.installed;
+    } catch (e) {
+      console.warn('Could not detect the Mystic Paradox Launcher:', e);
+      setMysticLauncherInstalled(false);
+      return false;
+    }
+  };
+
+  const openMysticParadoxReleases = async () => {
+    try {
+      await openPath(MYSTIC_PARADOX_RELEASES_URL);
+    } catch (e: any) {
+      console.error('Could not open Mystic Paradox releases:', e);
+      showNotification('Could not open the Mystic Paradox releases page', 'error');
+    }
+  };
+
+  /**
+   * Every Dauntless play action ends up here after the game itself is
+   * installed: open Mystic Paradox's launcher when it exists, otherwise send
+   * the player to its releases page.
+   */
+  const handleMysticParadoxAction = async () => {
+    let installed = mysticLauncherInstalled;
+    if (installed === null) {
+      installed = await refreshMysticLauncher();
+    }
+
+    if (installed) {
+      try {
+        await launchMysticLauncher();
+        showNotification('Opening Mystic Paradox Launcher...', 'info');
+        return;
+      } catch (e: any) {
+        console.error('Could not launch Mystic Paradox Launcher:', e);
+        showNotification('Could not open the Mystic Paradox Launcher', 'error');
+        // The launcher may have been uninstalled since the last check.
+        await refreshMysticLauncher();
+      }
+    }
+
+    await openMysticParadoxReleases();
+  };
+
+  useEffect(() => {
+    void refreshMysticLauncher();
+    const onFocus = () => {
+      void refreshMysticLauncher();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   // Collapse state is mirrored to localStorage so the sidebar keeps its width
   // between launcher sessions.
@@ -355,6 +421,17 @@ export const App: React.FC = () => {
   };
 
   const handleLaunch = async (game: GameItem, offline = false) => {
+    // Dauntless must be started through Mystic Paradox's launcher, never
+    // directly — that launcher performs the sign-in and runtime checks.
+    if (game.app_name === SPONSOR_APP_NAME) {
+      if (!game.is_installed) {
+        handleSponsorInstall();
+      } else {
+        await handleMysticParadoxAction();
+      }
+      return;
+    }
+
     try {
       showNotification(`Launching ${game.title}...`, 'info');
       const pid = await gameLaunch(game.app_name, offline);
@@ -669,6 +746,13 @@ export const App: React.FC = () => {
 
   const runningGamesList = useMemo(() => Object.values(runningGames), [runningGames]);
 
+  // First the game, then its required launcher.
+  const featuredGame = games.find((game) => game.app_name === SPONSOR_APP_NAME) ?? null;
+  const featuredInstalled = !!featuredGame?.is_installed;
+  const featuredDownload = downloads[SPONSOR_APP_NAME];
+  const featuredActiveDownload =
+    featuredDownload && isLiveDownload(featuredDownload.status) ? featuredDownload : null;
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#050507] text-white select-none">
       {/* Sidebar Navigation */}
@@ -733,7 +817,7 @@ export const App: React.FC = () => {
         <main className="flex-1 overflow-y-auto">
           {activeTab === 'home' && (
             <div className="p-8 space-y-8">
-              {/* Featured build — installs the Epic manifest automatically */}
+              {/* Featured community build — launch when installed, GitHub otherwise */}
               {!searchQuery && selectedFilter === 'all' && (
                 <div className="group relative overflow-hidden rounded-3xl border border-zinc-800 shadow-2xl shadow-black/40">
                   <img
@@ -769,19 +853,62 @@ export const App: React.FC = () => {
                         Dauntless
                       </h2>
                       <p className="mt-2 max-w-md text-xs leading-relaxed text-zinc-300/90">
-                        1.14.7 community server build — 611 files streamed headlessly into your library, no
-                        Steam client, no store page.
+                        1.14.7 community server build — install Dauntless here, then play it through
+                        the Mystic Paradox Launcher.
                       </p>
                     </div>
 
-                    <button
-                      onClick={handleSponsorInstall}
-                      className="flex shrink-0 items-center gap-2 px-5 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black font-extrabold text-xs shadow-xl shadow-black/40 transition hover:scale-105 cursor-pointer"
-                      title="Opens the Direct Downloader with this build's manifest, verified before installing"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span>INSTALL</span>
-                    </button>
+                    {featuredActiveDownload ? (
+                      <button
+                        onClick={() => setActiveTab('downloads')}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-amber-400 px-5 py-2.5 text-xs font-extrabold text-black shadow-xl shadow-black/40 transition hover:scale-105 hover:bg-amber-300"
+                        title="Open the Dauntless download in the queue"
+                      >
+                        <Download className="h-4 w-4" />
+                        <span>
+                          {featuredActiveDownload.status === 'Downloading'
+                            ? `DOWNLOADING ${featuredActiveDownload.progress_percent.toFixed(0)}%`
+                            : featuredActiveDownload.status === 'Paused'
+                            ? 'PAUSED'
+                            : 'PREPARING'}
+                        </span>
+                      </button>
+                    ) : !featuredInstalled ? (
+                      <button
+                        onClick={handleSponsorInstall}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-white px-5 py-2.5 text-xs font-extrabold text-black shadow-xl shadow-black/40 transition hover:scale-105 hover:bg-zinc-200"
+                        title="Install Dauntless 1.14.7"
+                      >
+                        <Download className="h-4 w-4" />
+                        <span>INSTALL</span>
+                      </button>
+                    ) : mysticLauncherInstalled === null ? (
+                      <button
+                        disabled
+                        className="flex shrink-0 cursor-wait items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-5 py-2.5 text-xs font-extrabold text-zinc-200 shadow-xl shadow-black/40 backdrop-blur-md"
+                      >
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>CHECKING</span>
+                      </button>
+                    ) : mysticLauncherInstalled ? (
+                      <button
+                        onClick={() => void handleMysticParadoxAction()}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 px-5 py-2.5 text-xs font-extrabold text-white shadow-xl shadow-orange-950/40 transition hover:scale-105 hover:from-orange-500 hover:to-amber-400 glow-orange"
+                        title="Open Mystic Paradox Launcher"
+                      >
+                        <Play className="h-4 w-4 fill-current" />
+                        <span>PLAY</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => void handleMysticParadoxAction()}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-white px-5 py-2.5 text-xs font-extrabold text-black shadow-xl shadow-black/40 transition hover:scale-105 hover:bg-zinc-200"
+                        title="Download the Mystic Paradox Launcher from GitHub Releases"
+                      >
+                        <Github className="h-4 w-4" />
+                        <span>GET LAUNCHER</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}

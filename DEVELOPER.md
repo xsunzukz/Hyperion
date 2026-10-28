@@ -140,7 +140,8 @@ A launcher does several things antivirus heuristics dislike, so the choices here
 | | |
 |---|---|
 | **Nothing is fetched or run at startup** | Opening the app downloads no executables and starts no child processes |
-| **No shelling out** | No `taskkill`, `reg query`, `tar` or PowerShell. Games are stopped with `TerminateProcess`, archives unpacked in-process, folders and links opened with `ShellExecute`. The only programs Hyperion starts are your games and SteamCMD |
+| **No shelling out** | No `taskkill`, `reg query`, `tar` or PowerShell. Games are stopped with `TerminateProcess`, archives unpacked in-process, folders and links opened with `ShellExecute`. The only programs Hyperion starts are your games, SteamCMD and the Mystic Paradox Launcher |
+| **Fixed external launcher path** | The Mystic Paradox Launcher is found through its uninstall registry entry, deep-link command or known install folder, then started directly. The webview cannot supply an executable path |
 | **No account snooping** | The Steam client's `loginusers.vdf`, `ssfn*` and browser data are never read. Only SteamCMD's own config in Hyperion's folder is checked |
 | **No persistence** | No services, scheduled tasks, startup entries or run keys |
 | **No injection** | No `ReadProcessMemory`, `CreateRemoteThread`, `SetWindowsHookEx`, DLL injection or drivers |

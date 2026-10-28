@@ -2522,6 +2522,189 @@ pub async fn diagnostics_get(state: State<'_, Arc<AppState>>) -> Result<SystemDi
     })
 }
 
+/// Where the Mystic Paradox Launcher is installed, if present.
+#[derive(serde::Serialize)]
+pub struct MysticLauncherStatus {
+    pub installed: bool,
+    pub path: Option<String>,
+}
+
+#[cfg(windows)]
+const MYSTIC_LAUNCHER_EXES: &[&str] = &[
+    "Paradox.exe",
+    "MysticParadox.exe",
+    "Mystic Paradox.exe",
+    "Mystic Paradox Launcher.exe",
+    "MysticParadoxLauncher.exe",
+    "launcher.exe",
+];
+
+#[cfg(windows)]
+fn normalize_registry_path(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // DisplayIcon can be `"C:\path\launcher.exe",0`; the command value can be
+    // `"C:\path\launcher.exe" "%1"`. Take the executable path, not the args.
+    let value = if let Some(rest) = raw.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    } else {
+        raw.split(',').next().unwrap_or(raw).trim()
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+#[cfg(windows)]
+fn is_mystic_launcher_exe(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    MYSTIC_LAUNCHER_EXES
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+#[cfg(windows)]
+fn launcher_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    MYSTIC_LAUNCHER_EXES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| is_mystic_launcher_exe(candidate))
+}
+
+/// Find the official launcher through the uninstall registry, its deep-link
+/// command, then the common Tauri install folders. This deliberately does not
+/// trust a path supplied by the webview.
+#[cfg(windows)]
+fn find_mystic_launcher() -> Option<PathBuf> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for wow in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+            let Ok(uninstall) = RegKey::predef(hive).open_subkey_with_flags(
+                r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+                KEY_READ | wow,
+            ) else {
+                continue;
+            };
+
+            for name in uninstall.enum_keys().flatten() {
+                let Ok(entry) = uninstall.open_subkey_with_flags(&name, KEY_READ | wow) else {
+                    continue;
+                };
+                let display_name = entry
+                    .get_value::<String, _>("DisplayName")
+                    .unwrap_or_default();
+                if !display_name.to_ascii_lowercase().contains("mystic paradox") {
+                    continue;
+                }
+
+                if let Some(icon) = entry
+                    .get_value::<String, _>("DisplayIcon")
+                    .ok()
+                    .and_then(|raw| normalize_registry_path(&raw))
+                {
+                    if is_mystic_launcher_exe(&icon) {
+                        return Some(icon);
+                    }
+                }
+
+                if let Some(location) = entry
+                    .get_value::<String, _>("InstallLocation")
+                    .ok()
+                    .and_then(|raw| normalize_registry_path(&raw))
+                {
+                    if let Some(exe) = launcher_in_dir(&location) {
+                        return Some(exe);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(command) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        r"Software\Classes\mysticparadox\shell\open\command",
+        KEY_READ,
+    ) {
+        if let Ok(value) = command.get_value::<String, _>("") {
+            if let Some(exe) = normalize_registry_path(&value) {
+                if is_mystic_launcher_exe(&exe) {
+                    return Some(exe);
+                }
+            }
+        }
+    }
+
+    let mut dirs = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let base = PathBuf::from(local);
+        dirs.push(base.join("Mystic Paradox Launcher"));
+        dirs.push(base.join("Programs").join("Mystic Paradox Launcher"));
+    }
+    for variable in ["PROGRAMFILES", "PROGRAMFILES(X86)"] {
+        if let Some(base) = std::env::var_os(variable) {
+            dirs.push(PathBuf::from(base).join("Mystic Paradox Launcher"));
+        }
+    }
+    dirs.iter().find_map(|dir| launcher_in_dir(dir))
+}
+
+#[cfg(not(windows))]
+fn find_mystic_launcher() -> Option<PathBuf> {
+    None
+}
+
+#[tauri::command]
+pub fn mystic_launcher_status() -> MysticLauncherStatus {
+    let path = find_mystic_launcher();
+    MysticLauncherStatus {
+        installed: path.is_some(),
+        path: path.map(|p| p.to_string_lossy().to_string()),
+    }
+}
+
+pub(crate) const MYSTIC_PARADOX_RELEASES_URL: &str =
+    "https://github.com/pranav158/Mystic-Paradox/releases";
+
+/// Starts the known Mystic Paradox Launcher executable. Shared by the UI
+/// command and the tray, so every Dauntless launch follows the same path.
+pub(crate) fn launch_mystic_launcher_process() -> Result<()> {
+    let path = find_mystic_launcher().ok_or_else(|| {
+        AppError::Io("Mystic Paradox Launcher is not installed.".to_string())
+    })?;
+
+    info!("Launching Mystic Paradox Launcher: {}", path.display());
+    let mut command = std::process::Command::new(&path);
+    if let Some(dir) = path.parent() {
+        command.current_dir(dir);
+    }
+    command
+        .spawn()
+        .map_err(|e| AppError::Io(format!("Could not launch Mystic Paradox Launcher: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn open_mystic_paradox_releases() -> Result<()> {
+    open::that_detached(MYSTIC_PARADOX_RELEASES_URL).map_err(|e| AppError::Io(e.to_string()))
+}
+
+/// Starts the Mystic Paradox Launcher from the UI.
+#[tauri::command]
+pub async fn launch_mystic_launcher() -> Result<()> {
+    launch_mystic_launcher_process()
+}
+
 /// Opens a folder/file in Explorer or an http(s) link in the browser.
 ///
 /// The webview may only open what the UI actually shows — install and save

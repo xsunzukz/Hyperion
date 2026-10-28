@@ -18,6 +18,7 @@ import {
   SteamCredentialStatus,
   SteamExtraContent,
   RunningGame,
+  MysticLauncherStatus,
 } from '../types';
 
 export const isTauri = (): boolean => {
@@ -519,14 +520,32 @@ export const diagnosticsGet = async (): Promise<SystemDiagnostics> => {
     free_memory_mb: 18432,
     default_install_dir: mockSettings.default_install_dir,
     free_disk_space_gb: 420.5,
-    app_version: '1.0.2',
+    app_version: '1.0.3',
     rust_version: '1.97.1',
   };
+};
+
+export const mysticLauncherStatus = async (): Promise<MysticLauncherStatus> => {
+  if (isTauri()) {
+    return invoke<MysticLauncherStatus>('mystic_launcher_status');
+  }
+  return { installed: false };
+};
+
+export const launchMysticLauncher = async (): Promise<void> => {
+  if (isTauri()) {
+    return invoke<void>('launch_mystic_launcher');
+  }
+  console.log('Mock: launching Mystic Paradox Launcher');
 };
 
 export const openPath = async (path: string): Promise<void> => {
   if (isTauri()) {
     return invoke<void>('open_path', { path });
+  }
+  if (/^https?:\/\//i.test(path)) {
+    window.open(path, '_blank', 'noopener,noreferrer');
+    return;
   }
   console.log('Opening folder:', path);
 };

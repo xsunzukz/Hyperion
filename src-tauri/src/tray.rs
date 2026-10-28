@@ -418,6 +418,18 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             app.exit(0);
         }
         _ => match id.strip_prefix("game:") {
+            // Dauntless must go through Mystic Paradox's launcher, never
+            // straight to the game executable. Missing launcher -> releases.
+            Some("Jackal") => {
+                if let Err(e) = crate::commands::launch_mystic_launcher_process() {
+                    tracing::warn!(
+                        "Mystic Paradox Launcher could not start ({e}); opening releases"
+                    );
+                    if let Err(open_err) = crate::commands::open_mystic_paradox_releases() {
+                        tracing::warn!("Could not open Mystic Paradox releases: {}", open_err);
+                    }
+                }
+            }
             // Clicking an installed game starts it, like the launcher's PLAY.
             Some(app_name) => {
                 let app_name = app_name.to_string();

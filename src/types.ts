@@ -110,6 +110,12 @@ export interface SteamAuthStatus {
   steam_id?: string;
 }
 
+/** Mystic Paradox Launcher installation detected on this PC */
+export interface MysticLauncherStatus {
+  installed: boolean;
+  path?: string;
+}
+
 /** In-memory session handed to the headless Steam download engine */
 export interface SteamCredentialStatus {
   has_credentials: boolean;
