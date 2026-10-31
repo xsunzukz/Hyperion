@@ -34,8 +34,8 @@ Hyperion is a **Tauri 2** desktop app with a **Rust** core and a **React 19 + Ty
 | `src-tauri/src/installer.rs` | Verify, safe paths and safe uninstall |
 | `src-tauri/src/launcher.rs` | Native process launch with Epic arguments |
 | `src-tauri/src/cloud_save.rs` | Path-template expansion and cloud-save sync |
-| `src-tauri/src/storage.rs` | SQLite persistence for settings, catalog and installed games |
-| `src-tauri/src/secret.rs` | DPAPI encryption for the optional remembered Steam password and saved Epic session |
+| `src-tauri/src/storage.rs` | SQLite persistence for settings, catalog, installed games and the sealed Epic session |
+| `src-tauri/src/secret.rs` | DPAPI encryption for the saved Epic session and an optional remembered Steam password |
 | `src-tauri/src/tray.rs` | Live tray menu: downloads, installed games, show and quit |
 | `src-tauri/src/winproc.rs` | `TerminateProcess` and a toolhelp process-tree walk |
 | `src-tauri/src/steam/` | SteamCMD driver, Steam library scanner and VDF parser |
@@ -250,7 +250,7 @@ hyperion/
     ├── launcher.rs              Native process launch with Epic arguments
     ├── cloud_save.rs            Path templates and datastorage sync
     ├── storage.rs               SQLite persistence
-    ├── secret.rs                DPAPI store for a remembered Steam login
+    ├── secret.rs                DPAPI store for the Epic session and a remembered Steam login
     ├── tray.rs                  Live tray menu
     ├── winproc.rs               TerminateProcess and toolhelp process-tree walk
     └── steam/                   SteamCMD driver, library scanner, VDF parser

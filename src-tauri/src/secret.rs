@@ -1,10 +1,11 @@
-//! At-rest protection for the remembered Steam password.
+//! At-rest protection for stored credentials: the saved Epic session and the
+//! remembered Steam password.
 //!
-//! The password is encrypted with Windows DPAPI (`CryptProtectData`) scoped to
-//! the current Windows user, then base64-encoded into the local SQLite settings
-//! table. A copy of `hyperion.db` on another machine or Windows account
-//! cannot be decrypted, so the comfort of "remember me" does not turn into a
-//! plaintext credential leak.
+//! Both are encrypted with Windows DPAPI (`CryptProtectData`) scoped to the
+//! current Windows user, then base64-encoded into the local SQLite database
+//! (the Epic session by `storage.rs`). A copy of `hyperion.db` on another
+//! machine or Windows account cannot be decrypted, so staying signed in does
+//! not turn into a plaintext credential leak.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use tracing::{debug, warn};

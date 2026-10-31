@@ -1,9 +1,25 @@
 use crate::error::Result;
 use crate::models::{AppSettings, InstalledGame, Session};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+/// Prefix of a `session_json` value sealed with Windows DPAPI
+const SEALED_SESSION_PREFIX: &str = "dpapi:";
+
+/// Seals the Epic session for the disk. DPAPI binds it to the current Windows
+/// user, so a copied `hyperion.db` does not carry a usable sign-in.
+#[cfg(target_os = "windows")]
+fn seal_session(json: &str) -> Result<String> {
+    Ok(format!("{}{}", SEALED_SESSION_PREFIX, crate::secret::encrypt(json)?))
+}
+
+/// No OS key store is wired up off Windows; the session is kept as JSON
+#[cfg(not(target_os = "windows"))]
+fn seal_session(json: &str) -> Result<String> {
+    Ok(json.to_string())
+}
 
 #[derive(Debug, Clone)]
 pub struct CachedCatalogItem {
@@ -28,9 +44,9 @@ impl Storage {
 
         info!("Opening database at {}", db_path.display());
         let conn = Connection::open(&db_path)?;
-        // Overwrite deleted rows/pages instead of leaving old credentials in
-        // SQLite free space after sign-out or a session refresh.
-        conn.execute_batch("PRAGMA secure_delete = ON;")?;
+        // Deleted rows are zeroed, so a replaced or signed-out session leaves
+        // no readable copy behind in the file's free space.
+        conn.pragma_update(None, "secure_delete", true)?;
         let storage = Self {
             conn: Mutex::new(conn),
             db_path,
@@ -388,105 +404,85 @@ impl Storage {
 
     // Auth State storage
     //
-    // Access/refresh tokens are wrapped with Windows DPAPI before they reach
-    // SQLite. The JSON is still parsed into `Session` in memory, but a copied
-    // database file cannot be replayed on another Windows account or machine.
-    fn protect_stored_secret(value: &str) -> Result<String> {
-        #[cfg(target_os = "windows")]
-        {
-            crate::secret::encrypt(value)
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = value;
-            Ok(value.to_string())
-        }
-    }
-
-    fn unprotect_stored_secret(value: &str) -> Result<String> {
-        #[cfg(target_os = "windows")]
-        {
-            // Older builds stored the session as plain JSON. Callers detect
-            // this before asking DPAPI to decrypt it so an upgrade can migrate
-            // in place instead of signing the user out.
-            if value.trim_start().starts_with('{') {
-                Ok(value.to_string())
-            } else {
-                crate::secret::decrypt(value)
-            }
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = value;
-            Ok(value.to_string())
-        }
-    }
-
-    fn write_session(&self, session: &Session) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let session_json = Self::protect_stored_secret(&serde_json::to_string(session)?)?;
+    // The Epic session is stored as DPAPI-sealed JSON prefixed with `dpapi:`.
+    // The old `refresh_token` column stays empty; the token lives only inside
+    // the sealed JSON. `secure_delete` plus VACUUM removes replaced plaintext
+    // copies from SQLite free pages.
+    pub fn save_session(&self, session: &Session) -> Result<()> {
+        let session_json = seal_session(&serde_json::to_string(session)?)?;
         let display_name = session
             .display_name
             .clone()
             .unwrap_or_else(|| "User".to_string());
-        let refresh_token = match session.refresh_token.as_deref() {
-            Some(token) if !token.is_empty() => Self::protect_stored_secret(token)?,
-            _ => String::new(),
-        };
 
+        // The refresh token lives only inside the sealed JSON; its old column stays empty.
+        let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
             INSERT OR REPLACE INTO auth_state (id, account_id, display_name, refresh_token, session_json, updated_at)
-            VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            VALUES (1, ?1, ?2, '', ?3, CURRENT_TIMESTAMP)
             "#,
-            params![session.account_id, display_name, refresh_token, session_json],
+            params![session.account_id, display_name, session_json],
         )?;
         Ok(())
     }
 
-    pub fn save_session(&self, session: &Session) -> Result<()> {
-        self.write_session(session)
-    }
-
     pub fn get_saved_session(&self) -> Result<Option<Session>> {
-        let conn = self.conn.lock().unwrap();
-        let stored = {
-            let mut stmt = conn.prepare("SELECT session_json FROM auth_state WHERE id = 1")?;
-            let mut rows = stmt.query([])?;
-            if let Some(row) = rows.next()? {
-                Some(row.get::<_, String>(0)?)
-            } else {
-                None
-            }
-        };
-
-        let Some(stored_json) = stored else {
+        let stored: Option<String> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT session_json FROM auth_state WHERE id = 1", [], |row| row.get(0))
+            .optional()?;
+        let Some(stored) = stored else {
             return Ok(None);
         };
 
-        let legacy_plaintext = stored_json.trim_start().starts_with('{');
-        let json = if legacy_plaintext {
-            stored_json
-        } else {
-            Self::unprotect_stored_secret(&stored_json)?
-        };
-        let session: Session = serde_json::from_str(&json)?;
-
-        if legacy_plaintext {
-            // Migrate the old plaintext row immediately. `secure_delete` plus
-            // VACUUM also removes the old JSON from SQLite free pages.
-            drop(conn);
-            self.write_session(&session)?;
-            let conn = self.conn.lock().unwrap();
-            let _ = conn.execute_batch("VACUUM;");
-            drop(conn);
+        if let Some(sealed) = stored.strip_prefix(SEALED_SESSION_PREFIX) {
+            let opened = crate::secret::decrypt(sealed)
+                .and_then(|json| Ok(serde_json::from_str::<Session>(&json)?));
+            return match opened {
+                Ok(session) => Ok(Some(session)),
+                Err(e) => {
+                    // Sealed for another PC or Windows user (a copied database), so
+                    // ask for a sign-in instead of failing on every start.
+                    warn!("Saved Epic session could not be unsealed ({}), clearing it", e);
+                    self.clear_session()?;
+                    Ok(None)
+                }
+            };
         }
 
+        // Older builds wrote plain JSON. An intermediate local build also
+        // DPAPI-encrypted the whole JSON without a prefix; accept both formats
+        // so an upgrade never signs the user out.
+        let parsed = serde_json::from_str::<Session>(&stored).ok();
+        let session = match parsed {
+            Some(session) => session,
+            None => match crate::secret::decrypt(&stored)
+                .ok()
+                .and_then(|json| serde_json::from_str::<Session>(&json).ok())
+            {
+                Some(session) => session,
+                None => {
+                    warn!("Saved Epic session is unreadable, clearing it");
+                    self.clear_session()?;
+                    return Ok(None);
+                }
+            },
+        };
+
+        // Migrate to the prefixed format, then rebuild the file so no earlier
+        // copy of a token remains in free pages.
+        if let Err(e) = self.save_session(&session) {
+            warn!("Could not seal the saved Epic session: {}", e);
+            return Ok(Some(session));
+        }
+        if let Err(e) = self.conn.lock().unwrap().execute_batch("VACUUM") {
+            warn!("Could not rebuild the database after sealing: {}", e);
+        }
         Ok(Some(session))
     }
-
     pub fn clear_session(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM auth_state WHERE id = 1", [])?;
