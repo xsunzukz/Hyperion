@@ -44,7 +44,7 @@ sysinfo = "0.33"
 # hidden `powershell.exe -NonInteractive -Command …`, a top behaviour signal.
 open = { version = "5.3", features = ["shellexecute-on-windows"] }
 url = "2.5"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 rfd = "0.15"
 # Unpacks Valve's steamcmd.zip in-process; a hidden `tar.exe` child is one more
