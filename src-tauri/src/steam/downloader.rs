@@ -684,6 +684,15 @@ impl SteamDownloadManager {
                 args.push(creds.username.trim().to_string());
                 logged_in_as_account = true;
             }
+            Some(creds) if creds.password.is_empty() => {
+                // Username-only credentials are used for cached-session
+                // downloads. If the cache was rejected, do not silently fall
+                // back to an anonymous login that cannot own the game.
+                return Err(
+                    "STEAM_LOGIN_REQUIRED: The cached Steam session expired. Sign in to Steam again."
+                        .to_string(),
+                );
+            }
             Some(creds)
                 if !creds.username.trim().is_empty() && !creds.password.is_empty() =>
             {

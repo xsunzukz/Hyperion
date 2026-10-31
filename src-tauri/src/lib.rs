@@ -23,6 +23,28 @@ use std::sync::Arc;
 use tauri::{Manager, WindowEvent};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Keep the main app webview on the bundled UI. The Epic sign-in window is the
+/// only webview allowed to navigate to remote hosts; everything else must stay
+/// on the Tauri app origin (or localhost during `tauri dev`).
+fn navigation_guard<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("hyperion-navigation")
+        .on_navigation(|webview, url| {
+            if webview.label() == "epic_auth" {
+                return true;
+            }
+
+            match url.scheme() {
+                "tauri" | "about" => true,
+                "http" | "https" => {
+                    url.host_str() == Some("tauri.localhost")
+                        || (cfg!(debug_assertions) && url.host_str() == Some("localhost"))
+                }
+                _ => false,
+            }
+        })
+        .build()
+}
+
 pub fn run() {
     // Structured logging initialization
     let _ = tracing_subscriber::registry()
@@ -50,6 +72,7 @@ pub fn run() {
             tracing::info!("Second launch forwarded to the running instance");
             crate::tray::reveal_main_window(app);
         }))
+        .plugin(navigation_guard())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

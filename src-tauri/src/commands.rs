@@ -1064,6 +1064,35 @@ fn install_target(
     crate::installer::resolve_install_dir(requested, &default_root, title, existing.as_deref())
 }
 
+/// Credentials for a SteamCMD download.
+///
+/// Prefer the in-memory login from this run. If the user did not ask Steam to
+/// remember the password, fall back to a username-only credential when
+/// SteamCMD still has a valid cached session; SteamCMD then logs in with its
+/// ConnectCache token and never sees a password.
+async fn steam_download_credentials(state: &AppState) -> Option<SteamCredentials> {
+    if let Some(credentials) = state.steam_credentials.lock().await.clone() {
+        return Some(credentials);
+    }
+
+    let username = state
+        .storage
+        .get_settings()
+        .ok()?
+        .steam_account
+        .filter(|name| !name.trim().is_empty())?;
+
+    if crate::steam::downloader::cached_session_exists(username.trim()) {
+        Some(SteamCredentials {
+            username,
+            password: String::new(),
+            guard_code: None,
+        })
+    } else {
+        None
+    }
+}
+
 /// Headless install engine: Valve's SteamCMD, driven with the user's Steam
 /// session. Runs entirely inside Hyperion — no Steam client window and
 /// no Steam library involvement; files land in the folder Hyperion was given.
@@ -1125,7 +1154,7 @@ pub async fn game_install(
             },
         };
 
-        let credentials = state.steam_credentials.lock().await.clone();
+        let credentials = steam_download_credentials(state.inner().as_ref()).await;
         if credentials.is_none() {
             return Err(AppError::Install(
                 "STEAM_LOGIN_REQUIRED: Sign in to Steam once so Hyperion can download this title in-app."
@@ -1149,7 +1178,7 @@ pub async fn game_install(
             .steam_app_id
             .ok_or_else(|| AppError::Install(format!("Invalid Steam AppID for {}", app_name)))?;
 
-        let credentials = state.steam_credentials.lock().await.clone();
+        let credentials = steam_download_credentials(state.inner().as_ref()).await;
         if credentials.is_none() {
             return Err(AppError::Install(
                 "STEAM_LOGIN_REQUIRED: Sign in to Steam once so Hyperion can download this title in-app."
@@ -2441,8 +2470,9 @@ pub async fn steam_install_custom(
         app_id, final_title
     );
 
-    // Reuse the in-memory Steam session if the user has signed in
-    let credentials = state.steam_credentials.lock().await.clone();
+    // Reuse the in-memory Steam session, or SteamCMD's cached session when
+    // the user did not ask Hyperion to remember the password.
+    let credentials = steam_download_credentials(state.inner().as_ref()).await;
 
     state
         .steam_downloader
