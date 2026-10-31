@@ -39,7 +39,7 @@ futures-util = "0.3"
 thiserror = "2.0"
 dirs = "6.0"
 uuid = { version = "1.13", features = ["v4"] }
-sysinfo = "0.33"
+sysinfo = "0.39"
 # ShellExecuteW for folders and URLs. Without this feature `open` starts a
 # hidden `powershell.exe -NonInteractive -Command …`, a top behaviour signal.
 open = { version = "5.3", features = ["shellexecute-on-windows"] }
