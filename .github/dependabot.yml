@@ -5,7 +5,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    # Routine version PRs are paused after the initial dependency sweep.
+    # Security updates still run independently.
+    open-pull-requests-limit: 0
     ignore:
       # These majors need a dedicated migration and UI regression pass.
       - dependency-name: tailwindcss
@@ -23,7 +25,7 @@ updates:
     directory: /src-tauri
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     ignore:
       # 0.x minor bumps are breaking API changes for these crates.
       - dependency-name: rusqlite
@@ -34,9 +36,17 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
       - dependency-name: sha2
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: rfd
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: dirs
+        update-types: ["version-update:semver-major"]
+      - dependency-name: sha1
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: aes-gcm
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
