@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ5MEE1MzM4NDQzMjI0ODUKUldTRkpESkVPRk1LU1NpSnJSbmZNTUc2RUV2WVl1M0VxM0JxSVF0TlovV0dYaDQ5bHlxRzBPcEsK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM3MjRDRjgwQTA3RDg4M0EKUldRNmlIMmdnTThrTitORWNBc3VEcEhFc3RGd3A2Nmw5NTRnbVRTS2VqYjBxRUZsME9wS1BMYjAK",
       "endpoints": [
         "https://hyperion-updater.rainfalls.workers.dev/latest.json"
       ]
