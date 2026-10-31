@@ -35,7 +35,7 @@ Hyperion is a **Tauri 2** desktop app with a **Rust** core and a **React 19 + Ty
 | `src-tauri/src/launcher.rs` | Native process launch with Epic arguments |
 | `src-tauri/src/cloud_save.rs` | Path-template expansion and cloud-save sync |
 | `src-tauri/src/storage.rs` | SQLite persistence for settings, catalog and installed games |
-| `src-tauri/src/secret.rs` | DPAPI-encrypted storage for an optional remembered Steam password |
+| `src-tauri/src/secret.rs` | DPAPI encryption for the optional remembered Steam password and saved Epic session |
 | `src-tauri/src/tray.rs` | Live tray menu: downloads, installed games, show and quit |
 | `src-tauri/src/winproc.rs` | `TerminateProcess` and a toolhelp process-tree walk |
 | `src-tauri/src/steam/` | SteamCMD driver, Steam library scanner and VDF parser |
@@ -65,7 +65,7 @@ Normal game installs go through the install-location prompt first; the chosen fo
 
 The updater is deliberately split into three small pieces:
 
-1. **Signing**: `tauri-plugin-updater` verifies a minisign signature before installing. The public key lives in `src-tauri/tauri.conf.json`; the private key and password are stored in `.secrets/` locally (gitignored) and must be added to GitHub Actions as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+1. **Signing**: `tauri-plugin-updater` verifies a minisign signature before installing. The public key lives in `src-tauri/tauri.conf.json`; the private key and password are kept outside the repository in `%LOCALAPPDATA%\Hyperion\signing` with an owner-only ACL, and must be added to GitHub Actions as `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 2. **Manifest**: a tagged CI build signs the NSIS installer and creates `latest.json` with the version, notes, signature, and GitHub asset URL. The signature and manifest are uploaded with the release.
 3. **Delivery**: the Cloudflare Worker in `cloudflare/updater-worker/` proxies `releases/latest/download/latest.json` with a five-minute cache. Its deployed endpoint is:
 
@@ -78,8 +78,9 @@ The first updater-capable build is **1.0.3**; older versions must be updated man
 Local updater builds use the overlay:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .secrets/hyperion-updater.key -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content .secrets/hyperion-updater-password.txt -Raw
+$signing = Join-Path $env:LOCALAPPDATA 'Hyperion\signing'
+$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content (Join-Path $signing 'hyperion-updater.key') -Raw).Trim()
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content (Join-Path $signing 'hyperion-updater-password.txt') -Raw).Trim()
 npm run tauri build -- --config src-tauri/tauri.updater.conf.json
 ```
 
@@ -153,6 +154,7 @@ Steam downloads run inside Hyperion — no Steam client window, no Steam library
 
 - SteamCMD is fetched into `%LOCALAPPDATA%\Hyperion\steamcmd` the first time the Steam sign-in is opened, and set up while the user types so the first login does not time out inside the Steam Guard window.
 - Credentials are verified with Valve before anything is stored, and live in **process memory only**. "Remember on this PC" (off by default) keeps a DPAPI-encrypted copy instead.
+- The Epic access/refresh tokens in `auth_state` are also DPAPI-encrypted; signing out deletes the row, vacuums the database, and clears the Epic WebView cookies.
 - SteamCMD caches its own session after one clean sign-in, so later downloads authenticate silently.
 - Listing the Steam games already on this PC is opt-in (`steam_library_scan`, or the Library banner's **Show Steam games** action).
 - Steam titles can be discovered through Hyperion's scanner or addressed directly with a `steam_<appid>` app name in the Direct Downloader.

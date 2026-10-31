@@ -564,7 +564,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           {/* Security Notice */}
           <div className="flex items-center gap-2 text-[11px] text-zinc-500 pt-2 border-t border-zinc-900">
             <Shield className="w-4 h-4 text-emerald-500/80 flex-shrink-0" />
-            <span>Tokens are saved securely in your local encrypted database only. No passwords are ever stored or handled.</span>
+            <span>Tokens are protected with Windows DPAPI on this PC. Steam passwords stay in memory unless you tick “Remember on this PC”.</span>
           </div>
         </div>
       </div>

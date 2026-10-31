@@ -605,10 +605,22 @@ pub async fn auth_resume_session(state: State<'_, Arc<AppState>>) -> Result<Opti
 }
 
 #[tauri::command]
-pub async fn auth_logout(state: State<'_, Arc<AppState>>) -> Result<()> {
+pub async fn auth_logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<()> {
     info!("User logging out");
     state.api_client.set_session(None).await;
     state.storage.clear_session()?;
+
+    // The Epic sign-in window shares the app's WebView data directory. Clearing
+    // it removes the persistent EPIC_SESSION_AP/receipt cookies too, so a later
+    // sign-in cannot silently reuse the previous web session.
+    for label in ["epic_auth", "main"] {
+        if let Some(window) = app.get_webview_window(label) {
+            if let Err(e) = window.clear_all_browsing_data() {
+                warn!("Could not clear WebView browsing data for {}: {}", label, e);
+            }
+        }
+    }
+
     Ok(())
 }
 

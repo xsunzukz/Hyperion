@@ -169,7 +169,8 @@ Hyperion is a client, not a store and not a DRM bypass. It signs in to **your** 
 - No background services, startup entries or scheduled tasks.
 - No account snooping: Hyperion never reads the Steam client's saved logins or browser data.
 - No shell commands or process injection. Games are stopped through the Windows API, not `taskkill`.
-- Your Epic token goes only to Epic. Steam credentials go only to Valve's SteamCMD.
+- Your Epic token goes only to Epic and is encrypted with Windows DPAPI at rest. Steam credentials go only to Valve's SteamCMD.
+- Signing out removes the saved Epic session and clears the Epic WebView cookies.
 - Launcher updates are signed and verified before installation.
 - Uninstall deletes only the files the game's manifest lists — saves and mods you added stay.
 

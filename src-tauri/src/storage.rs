@@ -28,6 +28,9 @@ impl Storage {
 
         info!("Opening database at {}", db_path.display());
         let conn = Connection::open(&db_path)?;
+        // Overwrite deleted rows/pages instead of leaving old credentials in
+        // SQLite free space after sign-out or a session refresh.
+        conn.execute_batch("PRAGMA secure_delete = ON;")?;
         let storage = Self {
             conn: Mutex::new(conn),
             db_path,
@@ -384,14 +387,54 @@ impl Storage {
     }
 
     // Auth State storage
-    pub fn save_session(&self, session: &Session) -> Result<()> {
+    //
+    // Access/refresh tokens are wrapped with Windows DPAPI before they reach
+    // SQLite. The JSON is still parsed into `Session` in memory, but a copied
+    // database file cannot be replayed on another Windows account or machine.
+    fn protect_stored_secret(value: &str) -> Result<String> {
+        #[cfg(target_os = "windows")]
+        {
+            crate::secret::encrypt(value)
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = value;
+            Ok(value.to_string())
+        }
+    }
+
+    fn unprotect_stored_secret(value: &str) -> Result<String> {
+        #[cfg(target_os = "windows")]
+        {
+            // Older builds stored the session as plain JSON. Callers detect
+            // this before asking DPAPI to decrypt it so an upgrade can migrate
+            // in place instead of signing the user out.
+            if value.trim_start().starts_with('{') {
+                Ok(value.to_string())
+            } else {
+                crate::secret::decrypt(value)
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = value;
+            Ok(value.to_string())
+        }
+    }
+
+    fn write_session(&self, session: &Session) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let session_json = serde_json::to_string(session)?;
+        let session_json = Self::protect_stored_secret(&serde_json::to_string(session)?)?;
         let display_name = session
             .display_name
             .clone()
             .unwrap_or_else(|| "User".to_string());
-        let refresh_token = session.refresh_token.clone().unwrap_or_default();
+        let refresh_token = match session.refresh_token.as_deref() {
+            Some(token) if !token.is_empty() => Self::protect_stored_secret(token)?,
+            _ => String::new(),
+        };
 
         conn.execute(
             r#"
@@ -403,22 +446,52 @@ impl Storage {
         Ok(())
     }
 
+    pub fn save_session(&self, session: &Session) -> Result<()> {
+        self.write_session(session)
+    }
+
     pub fn get_saved_session(&self) -> Result<Option<Session>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT session_json FROM auth_state WHERE id = 1")?;
-        let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            let json_str: String = row.get(0)?;
-            let session: Session = serde_json::from_str(&json_str)?;
-            Ok(Some(session))
+        let stored = {
+            let mut stmt = conn.prepare("SELECT session_json FROM auth_state WHERE id = 1")?;
+            let mut rows = stmt.query([])?;
+            if let Some(row) = rows.next()? {
+                Some(row.get::<_, String>(0)?)
+            } else {
+                None
+            }
+        };
+
+        let Some(stored_json) = stored else {
+            return Ok(None);
+        };
+
+        let legacy_plaintext = stored_json.trim_start().starts_with('{');
+        let json = if legacy_plaintext {
+            stored_json
         } else {
-            Ok(None)
+            Self::unprotect_stored_secret(&stored_json)?
+        };
+        let session: Session = serde_json::from_str(&json)?;
+
+        if legacy_plaintext {
+            // Migrate the old plaintext row immediately. `secure_delete` plus
+            // VACUUM also removes the old JSON from SQLite free pages.
+            drop(conn);
+            self.write_session(&session)?;
+            let conn = self.conn.lock().unwrap();
+            let _ = conn.execute_batch("VACUUM;");
+            drop(conn);
         }
+
+        Ok(Some(session))
     }
 
     pub fn clear_session(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM auth_state WHERE id = 1", [])?;
+        // Remove the token from free pages as well as the live row.
+        let _ = conn.execute_batch("VACUUM;");
         Ok(())
     }
 }

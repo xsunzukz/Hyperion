@@ -60,7 +60,7 @@ export const AboutView: React.FC = () => {
           {/* Badges */}
           <div className="flex items-center gap-2.5 pt-1">
             <span className="px-3.5 py-1 rounded-full text-xs font-mono font-medium bg-orange-950/50 border border-orange-500/35 text-orange-400 tracking-wide shadow-sm">
-              Launcher v1.0.3
+              Launcher v1.0.4
             </span>
           </div>
         </div>

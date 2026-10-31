@@ -1,6 +1,6 @@
 [package]
 name = "hyperion"
-version = "1.0.3"
+version = "1.0.4"
 description = "Hyperion - Fast native Rust game launcher for Epic Games Store"
 authors = ["Hyperion Contributors"]
 edition = "2021"
@@ -49,7 +49,7 @@ hex = "0.4"
 rfd = "0.15"
 # Unpacks Valve's steamcmd.zip in-process; a hidden `tar.exe` child is one more
 # shell-out behaviour engines score against an unsigned app.
-zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 # Win32 APIs used instead of shelling out to taskkill/reg, which antivirus

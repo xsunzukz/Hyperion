@@ -1686,9 +1686,13 @@ fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("Could not read steamcmd.zip entry {}: {}", i, e))?;
+        let name = entry
+            .name()
+            .map(|name| name.into_owned())
+            .unwrap_or_else(|_| format!("entry {i}"));
         let relative = entry
             .enclosed_name()
-            .ok_or_else(|| format!("steamcmd.zip has an unsafe entry: {}", entry.name()))?;
+            .ok_or_else(|| format!("steamcmd.zip has an unsafe entry: {}", name))?;
         let out = dest.join(relative);
 
         if entry.is_dir() {

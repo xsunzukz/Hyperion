@@ -247,6 +247,21 @@ mod tests {
         };
 
         storage.save_session(&session).unwrap();
+
+        #[cfg(target_os = "windows")]
+        {
+            let raw = std::fs::read(&storage.db_path).unwrap();
+            let contains = |needle: &[u8]| raw.windows(needle.len()).any(|window| window == needle);
+            assert!(
+                !contains(b"test_access_token"),
+                "access token must not be stored as plaintext"
+            );
+            assert!(
+                !contains(b"test_refresh_token"),
+                "refresh token must not be stored as plaintext"
+            );
+        }
+
         let loaded_session = storage
             .get_saved_session()
             .unwrap()
