@@ -46,7 +46,7 @@ Sign in with Epic once. Connect Steam when you want in-app Steam downloads. Sear
 
 ### ⚡ Downloads that keep going
 
-Parallel chunks, automatic retries and crash-safe resume. A stalled CDN route no longer means starting a 70 GB download again.
+Parallel chunks, automatic retries and crash-safe resume. A stalled CDN route no longer means starting a 70 GB download again. On a PC with more than one independent uplink, **Settings → Multi-network downloads** spreads chunks across them.
 
 </td>
 </tr>
