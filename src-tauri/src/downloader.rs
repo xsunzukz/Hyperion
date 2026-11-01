@@ -716,6 +716,15 @@ impl DownloadManager {
                             chunk_data = Some(data);
                             break;
                         }
+                        Err(FetchFailure::Refused(e)) => {
+                            warn!(
+                                "Network refused a chunk ({}); switching the rest to the default route",
+                                e
+                            );
+                            lease.mark_down();
+                            last_error = e;
+                            break;
+                        }
                         Err(FetchFailure::Missing(e)) => {
                             missing_on_cdn = true;
                             warn!("Chunk download {} on attempt {}", e, attempt + 1);
@@ -1033,8 +1042,10 @@ const INITIAL_TYPICAL_CHUNK_MS: u64 = 2_000;
 
 /// How one fetch of a chunk failed.
 enum FetchFailure {
-    /// 404/403: this CDN does not have the chunk at all
+    /// 404: this CDN does not have the chunk at all
     Missing(String),
+    /// 403/429/503 from a network that is being limited; try another adapter
+    Refused(String),
     /// Anything worth retrying: network, stall, truncated body, bad data
     Other(String),
 }
@@ -1061,13 +1072,16 @@ async fn fetch_chunk(
     let status = resp.status();
     if !status.is_success() {
         let message = format!("HTTP {}", status);
-        return Err(
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::FORBIDDEN {
-                FetchFailure::Missing(message)
-            } else {
-                FetchFailure::Other(message)
-            },
-        );
+        return Err(if status == reqwest::StatusCode::NOT_FOUND {
+            FetchFailure::Missing(message)
+        } else if status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        {
+            FetchFailure::Refused(message)
+        } else {
+            FetchFailure::Other(message)
+        });
     }
     let raw = resp
         .bytes()
