@@ -1,6 +1,49 @@
-import React from 'react';
-import { Download, Pause, Play, X, AlertCircle, Loader2 } from 'lucide-react';
-import { DownloadProgress } from '../types';
+import React, { useEffect, useState } from 'react';
+import { Download, Pause, Play, X, AlertCircle, Loader2, Globe } from 'lucide-react';
+import { DownloadProgress, NetworkProgress } from '../types';
+import { networkProgress } from '../lib/ipc';
+
+const NetworkBreakdown: React.FC<{ appName: string }> = ({ appName }) => {
+  const [networks, setNetworks] = useState<NetworkProgress[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const next = await networkProgress(appName);
+        if (!cancelled) setNetworks(next);
+      } catch {
+        // A single-link/download-end race should just hide the row.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [appName]);
+
+  if (networks.length < 2) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-1">
+      <Globe className="w-3.5 h-3.5 text-sky-400/80" />
+      {networks.map((network) => (
+        <span
+          key={network.id}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 px-2 py-1 text-[10px] font-mono text-sky-200/90"
+          title={`${network.chunks} chunks via ${network.name}`}
+        >
+          <span className="max-w-[12rem] truncate">{network.name}</span>
+          <span className="text-sky-400">
+            {(network.speed_bytes_per_sec / (1024 * 1024)).toFixed(1)} MB/s
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+};
 
 interface DownloadsViewProps {
   downloads: DownloadProgress[];
@@ -177,6 +220,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                   </div>
                 </div>
               )}
+
+              {d.status === 'Downloading' && <NetworkBreakdown appName={d.app_name} />}
 
               {/* Error Message if Failed */}
               {d.status === 'Failed' && d.error_message && (

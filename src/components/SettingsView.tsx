@@ -10,8 +10,8 @@ import {
   Minimize2,
   RefreshCw,
 } from 'lucide-react';
-import { AppSettings } from '../types';
-import { selectDirectory, settingsGet, settingsSave } from '../lib/ipc';
+import { AppSettings, NetworkInfo } from '../types';
+import { networksList, selectDirectory, settingsGet, settingsSave } from '../lib/ipc';
 
 interface SettingsViewProps {
   /** Lets the shell reload the library after preferences change */
@@ -25,6 +25,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onCheckForUpdates,
 }) => {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [networks, setNetworks] = useState<NetworkInfo[]>([]);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -32,8 +33,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   useEffect(() => {
     const fetch = async () => {
       try {
-        const s = await settingsGet();
+        const [s, n] = await Promise.all([
+          settingsGet(),
+          networksList().catch(() => [] as NetworkInfo[]),
+        ]);
         setSettings(s);
+        setNetworks(n);
       } catch (e) {
         console.error('Failed to load settings:', e);
       } finally {
@@ -80,6 +85,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   if (loading || !settings) {
     return <div className="p-8 text-zinc-400 font-mono text-sm">Loading configuration...</div>;
   }
+
+  const networkIds = settings.network_ids ?? [];
+  const physicalSubnets = networks
+    .filter((network) => !network.is_virtual && network.subnet)
+    .map((network) => network.subnet as string);
+  const sharedSubnet = new Set(physicalSubnets).size !== physicalSubnets.length;
+  const toggleNetwork = (id: string) => {
+    const next = networkIds.includes(id)
+      ? networkIds.filter((existing) => existing !== id)
+      : [...networkIds, id];
+    setSettings({ ...settings, network_ids: next });
+  };
 
   return (
     <div className="p-8 max-w-4xl space-y-6">
@@ -201,6 +218,98 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </select>
             </div>
           </div>
+        </div>
+
+        {/* Multi-network downloads */}
+        <div className="p-6 rounded-2xl glass-panel border border-zinc-800/80 bg-zinc-950/80 space-y-4">
+          <label className="flex items-center gap-2 text-sm font-bold text-white">
+            <Globe className="w-4 h-4 text-orange-400" />
+            <span>Multi-network downloads</span>
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                Network mode
+              </label>
+              <select
+                value={settings.network_mode}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    network_mode: e.target.value as AppSettings['network_mode'],
+                  })
+                }
+                className="w-full bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-orange-500 transition cursor-pointer"
+              >
+                <option value="auto">Auto — one adapter per network</option>
+                <option value="selected">Selected adapters</option>
+                <option value="off">Off — default route only</option>
+              </select>
+            </div>
+            <div className="text-xs text-zinc-400 leading-relaxed flex items-end">
+              Only separate uplinks add bandwidth. Wi-Fi and Ethernet on the same router share one
+              connection; a phone USB tether is a separate uplink.
+            </div>
+          </div>
+
+          {networks.length === 0 ? (
+            <p className="text-xs text-zinc-500">No network adapters were detected.</p>
+          ) : (
+            <div className="space-y-2">
+              {networks.map((network) => (
+                <label
+                  key={network.id}
+                  className={`flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 transition ${
+                    settings.network_mode === 'selected'
+                      ? 'cursor-pointer hover:border-orange-500/40'
+                      : 'cursor-default'
+                  } ${
+                    settings.network_mode === 'selected' && networkIds.includes(network.id)
+                      ? 'border-orange-500/40 bg-orange-500/5'
+                      : 'border-zinc-800 bg-zinc-900/50'
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-zinc-200 truncate flex items-center gap-2">
+                      {network.name}
+                      {network.is_virtual && (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-zinc-800 text-zinc-400 border border-zinc-700">
+                          virtual
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-zinc-500 font-mono mt-0.5">
+                      {network.kind} · {network.ipv4}
+                      {network.subnet ? ` · ${network.subnet}` : ''}
+                    </div>
+                  </div>
+                  {settings.network_mode === 'selected' && (
+                    <input
+                      type="checkbox"
+                      checked={networkIds.includes(network.id)}
+                      onChange={() => toggleNetwork(network.id)}
+                      className="rounded bg-zinc-900 border-zinc-800 accent-orange-500 text-orange-500 focus:ring-orange-500"
+                    />
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+
+          {sharedSubnet && settings.network_mode !== 'off' && (
+            <p className="text-[11px] text-amber-400/90 leading-relaxed">
+              Two adapters share a subnet. Auto mode uses one of them because they likely share the
+              same router and upstream.
+            </p>
+          )}
+
+          {physicalSubnets.length < 2 && settings.network_mode !== 'off' && (
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              Only one usable adapter was detected. Downloads keep using the normal default route;
+              connect a second independent uplink to use multi-network mode.
+            </p>
+          )}
         </div>
 
         {/* Language & Updates */}

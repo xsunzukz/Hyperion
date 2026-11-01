@@ -1876,6 +1876,14 @@ pub async fn game_get_all_downloads(
 }
 
 #[tauri::command]
+pub async fn game_get_download_networks(
+    app_name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<Vec<crate::models::NetworkProgress>>> {
+    Ok(state.downloader.get_network_progress(&app_name).await)
+}
+
+#[tauri::command]
 pub async fn game_verify(
     app_name: String,
     state: State<'_, Arc<AppState>>,
@@ -2536,6 +2544,11 @@ pub async fn settings_get(state: State<'_, Arc<AppState>>) -> Result<AppSettings
 #[tauri::command]
 pub async fn settings_save(settings: AppSettings, state: State<'_, Arc<AppState>>) -> Result<()> {
     state.storage.save_settings(&settings)
+}
+
+#[tauri::command]
+pub fn networks_list() -> Vec<crate::network::NetworkInfo> {
+    crate::network::list_networks()
 }
 
 #[tauri::command]

@@ -9,6 +9,7 @@ pub mod launcher;
 pub mod manifest;
 pub mod manifest_cache;
 pub mod models;
+pub mod network;
 pub mod secret;
 pub mod state;
 pub mod steam;
@@ -95,6 +96,7 @@ pub fn run() {
             commands::game_resume_download,
             commands::game_get_download_progress,
             commands::game_get_all_downloads,
+            commands::game_get_download_networks,
             commands::game_verify,
             commands::game_uninstall,
             commands::game_launch,
@@ -106,6 +108,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::diagnostics_get,
+            commands::networks_list,
             commands::mystic_launcher_status,
             commands::launch_mystic_launcher,
             commands::open_path,

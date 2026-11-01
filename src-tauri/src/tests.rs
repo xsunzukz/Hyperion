@@ -195,12 +195,19 @@ mod tests {
         settings.max_workers = 12;
         settings.language = "de".to_string();
         settings.steam_library_scan = true;
+        settings.network_mode = "selected".to_string();
+        settings.network_ids = vec!["Ethernet|192.168.1.10".to_string()];
         storage.save_settings(&settings).unwrap();
 
         let loaded_settings = storage.get_settings().unwrap();
         assert_eq!(loaded_settings.max_workers, 12);
         assert_eq!(loaded_settings.language, "de");
         assert!(loaded_settings.steam_library_scan);
+        assert_eq!(loaded_settings.network_mode, "selected");
+        assert_eq!(
+            loaded_settings.network_ids,
+            vec!["Ethernet|192.168.1.10".to_string()]
+        );
 
         // Test Installed Game
         let game = InstalledGame {

@@ -2,15 +2,16 @@ use crate::chunk::Chunk;
 use crate::error::{AppError, Result};
 use crate::installer::{safe_join, same_dir, Installer, RESUME_JOURNAL};
 use crate::manifest::{ChunkInfo, FileManifest, Manifest};
-use crate::models::{DownloadProgress, DownloadStatus, InstalledGame};
+use crate::models::{DownloadProgress, DownloadStatus, InstalledGame, NetworkProgress};
 use crate::storage::Storage;
 use reqwest::Client;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
+use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -25,6 +26,153 @@ pub struct ActiveDownload {
     pub pause_flag: Arc<AtomicBool>,
     pub progress: Arc<Mutex<DownloadProgress>>,
     pub app_handle: AppHandle,
+    pub network_pool: Arc<NetworkPool>,
+    pub network_started: Instant,
+}
+
+/// One HTTP client bound to a single source address. Windows then sends that
+/// client's sockets out of the adapter that owns the address.
+pub struct NetworkClient {
+    id: String,
+    name: String,
+    client: Client,
+    inflight: AtomicUsize,
+    bytes: AtomicU64,
+    chunks: AtomicU64,
+    down: AtomicBool,
+}
+
+pub struct NetworkLease {
+    client: Option<Arc<NetworkClient>>,
+}
+
+impl NetworkLease {
+    fn client(&self) -> Option<&Client> {
+        self.client.as_ref().map(|client| &client.client)
+    }
+
+    fn record(&self, bytes: u64) {
+        if let Some(client) = &self.client {
+            client.bytes.fetch_add(bytes, Ordering::Relaxed);
+            client.chunks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn mark_down(&self) {
+        if let Some(client) = &self.client {
+            client.down.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for NetworkLease {
+    fn drop(&mut self) {
+        if let Some(client) = &self.client {
+            client.inflight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Network clients are used only when at least two independent adapters were
+/// selected. With one adapter the existing default-route client is kept, so a
+/// single-link user sees exactly the old behavior.
+pub struct NetworkPool {
+    clients: Vec<Arc<NetworkClient>>,
+}
+
+impl NetworkPool {
+    fn from_settings(settings: &crate::models::AppSettings) -> Self {
+        let selected = crate::network::selected_networks(settings);
+        if selected.len() < 2 {
+            return Self {
+                clients: Vec::new(),
+            };
+        }
+
+        let mut clients = Vec::new();
+        for network in selected {
+            let ip: IpAddr = match network.ipv4.parse() {
+                Ok(ip) => ip,
+                Err(_) => continue,
+            };
+            let client = Client::builder()
+                .local_address(ip)
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(90))
+                .tcp_nodelay(true)
+                .tcp_keepalive(Duration::from_secs(30))
+                .pool_max_idle_per_host(32)
+                // One socket per chunk stream, like Plexo's per-network HTTP/1
+                // agents; HTTP/2 multiplexing would collapse the streams onto
+                // one connection and lose the per-connection CDN cap.
+                .http1_only()
+                .build();
+            match client {
+                Ok(client) => {
+                    info!(
+                        "Multi-network download: {} ({}) via {}",
+                        network.name, network.ipv4, ip
+                    );
+                    clients.push(Arc::new(NetworkClient {
+                        id: network.id,
+                        name: network.name,
+                        client,
+                        inflight: AtomicUsize::new(0),
+                        bytes: AtomicU64::new(0),
+                        chunks: AtomicU64::new(0),
+                        down: AtomicBool::new(false),
+                    }));
+                }
+                Err(error) => warn!(
+                    "Could not bind download client to {} ({}): {}",
+                    network.name, network.ipv4, error
+                ),
+            }
+        }
+
+        if clients.len() < 2 {
+            warn!("Fewer than two usable network bindings; using the default route");
+            return Self {
+                clients: Vec::new(),
+            };
+        }
+
+        Self { clients }
+    }
+
+    fn acquire(&self) -> NetworkLease {
+        if self.clients.is_empty() {
+            return NetworkLease { client: None };
+        }
+        let client = self
+            .clients
+            .iter()
+            .filter(|client| !client.down.load(Ordering::Relaxed))
+            .min_by_key(|client| client.inflight.load(Ordering::Relaxed))
+            .cloned();
+        if let Some(client) = &client {
+            client.inflight.fetch_add(1, Ordering::Relaxed);
+        }
+        NetworkLease { client }
+    }
+
+    fn progress(&self, elapsed: Duration) -> Vec<NetworkProgress> {
+        let seconds = elapsed.as_secs_f64().max(0.001);
+        self.clients
+            .iter()
+            .map(|client| {
+                let bytes = client.bytes.load(Ordering::Relaxed);
+                NetworkProgress {
+                    id: client.id.clone(),
+                    name: client.name.clone(),
+                    bytes,
+                    speed_bytes_per_sec: (bytes as f64 / seconds) as u64,
+                    chunks: client.chunks.load(Ordering::Relaxed),
+                }
+            })
+            .collect()
+    }
 }
 
 pub struct DownloadManager {
@@ -70,6 +218,12 @@ impl DownloadManager {
         } else {
             None
         }
+    }
+
+    pub async fn get_network_progress(&self, app_name: &str) -> Option<Vec<NetworkProgress>> {
+        let downloads = self.active_downloads.lock().await;
+        let download = downloads.get(app_name)?;
+        Some(download.network_pool.progress(download.network_started.elapsed()))
     }
 
     pub async fn get_all_active(&self) -> Vec<DownloadProgress> {
@@ -149,6 +303,10 @@ impl DownloadManager {
 
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let pause_flag = Arc::new(AtomicBool::new(false));
+        let network_pool = Arc::new(NetworkPool::from_settings(
+            &storage.get_settings().unwrap_or_default(),
+        ));
+        let network_started = Instant::now();
 
         let total_bytes: u64 = manifest
             .file_manifest_list
@@ -181,6 +339,8 @@ impl DownloadManager {
             pause_flag: pause_flag.clone(),
             progress: progress.clone(),
             app_handle: app_handle.clone(),
+            network_pool: network_pool.clone(),
+            network_started,
         });
 
         {
@@ -208,6 +368,7 @@ impl DownloadManager {
                     progress.clone(),
                     installed_game,
                     storage,
+                    network_pool,
                 )
                 .await;
 
@@ -245,6 +406,7 @@ impl DownloadManager {
         progress: Arc<Mutex<DownloadProgress>>,
         installed_game: Option<InstalledGame>,
         storage: Arc<Storage>,
+        network_pool: Arc<NetworkPool>,
     ) -> Result<()> {
         // 0. Every file must land inside the install folder. A crafted manifest
         //    is refused before anything is created or written.
@@ -464,7 +626,8 @@ impl DownloadManager {
             }
 
             let sem = semaphore.clone();
-            let client = self.client.clone();
+            let base_client = self.client.clone();
+            let network_pool = network_pool.clone();
             let base_url = base_url.clone();
             let auth_token = auth_token.clone();
             let chunk_refs = chunk_refs.clone();
@@ -511,6 +674,8 @@ impl DownloadManager {
 
                 let chunk_rel_path = chunk_info.path(manifest_version);
                 let chunk_url = format!("{}/{}", base_url.trim_end_matches('/'), chunk_rel_path);
+                let lease = network_pool.acquire();
+                let client = lease.client().unwrap_or(&base_client);
 
                 // Fetch, decode and hash-check the chunk, retrying the whole
                 // sequence: a truncated body, a bad inflate or a SHA-1 mismatch
@@ -534,7 +699,7 @@ impl DownloadManager {
                     let started = Instant::now();
                     let hedge_after = hedge_delay(typical_ms.load(Ordering::Relaxed));
                     let (result, hedged) = fetch_chunk_hedged(
-                        &client,
+                        client,
                         &chunk_url,
                         auth_token.as_deref(),
                         expected_sha,
@@ -566,6 +731,36 @@ impl DownloadManager {
 
                 if cancel() {
                     return;
+                }
+
+                // A selected adapter can have an address but no route (VPN
+                // split-tunnel, unplugged cable, captive portal). Do not fail
+                // the whole install on it: make one final attempt through the
+                // normal default-route client.
+                let mut used_default_fallback = false;
+                if chunk_data.is_none() && lease.client().is_some() {
+                    let (result, _) = fetch_chunk_hedged(
+                        &base_client,
+                        &chunk_url,
+                        auth_token.as_deref(),
+                        expected_sha,
+                        hedge_delay(typical_ms.load(Ordering::Relaxed)),
+                    )
+                    .await;
+                    if let Ok(data) = result {
+                        warn!(
+                            "Chunk succeeded on the default route after its selected network failed"
+                        );
+                        chunk_data = Some(data);
+                        used_default_fallback = true;
+                        lease.mark_down();
+                    }
+                }
+
+                if let Some(data) = &chunk_data {
+                    if !used_default_fallback {
+                        lease.record(data.len() as u64);
+                    }
                 }
 
                 let guid = chunk_info.guid;

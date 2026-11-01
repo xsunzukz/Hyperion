@@ -141,6 +141,24 @@ export interface RunningGame {
   started_at: string;
 }
 
+export interface NetworkInfo {
+  id: string;
+  name: string;
+  kind: string;
+  ipv4: string;
+  netmask?: string;
+  subnet?: string;
+  is_virtual: boolean;
+}
+
+export interface NetworkProgress {
+  id: string;
+  name: string;
+  bytes: number;
+  speed_bytes_per_sec: number;
+  chunks: number;
+}
+
 export interface AppSettings {
   default_install_dir: string;
   max_workers: number;
@@ -150,6 +168,9 @@ export interface AppSettings {
   /** Check the signed launcher updater on launch and show a prompt */
   auto_update_launcher: boolean;
   skip_update_check: boolean;
+  /** auto = one adapter per subnet, selected = only network_ids, off = legacy client */
+  network_mode: 'auto' | 'selected' | 'off';
+  network_ids: string[];
   platform: string;
   steam_account?: string;
   steam_id?: string;

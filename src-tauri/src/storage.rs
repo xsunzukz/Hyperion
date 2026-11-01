@@ -353,6 +353,14 @@ impl Storage {
                 "auto_update" => settings.auto_update = val == "true",
                 "auto_update_launcher" => settings.auto_update_launcher = val == "true",
                 "skip_update_check" => settings.skip_update_check = val == "true",
+                "network_mode" => {
+                    if matches!(val.as_str(), "auto" | "selected" | "off") {
+                        settings.network_mode = val;
+                    }
+                }
+                "network_ids" => {
+                    settings.network_ids = serde_json::from_str(&val).unwrap_or_default();
+                }
                 "platform" => settings.platform = val,
                 "steam_account" => settings.steam_account = if val.is_empty() { None } else { Some(val) },
                 "steam_id" => settings.steam_id = if val.is_empty() { None } else { Some(val) },
@@ -381,6 +389,11 @@ impl Storage {
                 settings.auto_update_launcher.to_string(),
             ),
             ("skip_update_check", settings.skip_update_check.to_string()),
+            ("network_mode", settings.network_mode.clone()),
+            (
+                "network_ids",
+                serde_json::to_string(&settings.network_ids).unwrap_or_else(|_| "[]".to_string()),
+            ),
             ("platform", settings.platform.clone()),
             ("steam_account", settings.steam_account.clone().unwrap_or_default()),
             ("steam_id", settings.steam_id.clone().unwrap_or_default()),

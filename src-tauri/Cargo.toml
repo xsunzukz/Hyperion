@@ -47,6 +47,7 @@ url = "2.5"
 base64 = "0.22"
 hex = "0.4"
 rfd = "0.15"
+network-interface = "2.0.5"
 # Unpacks Valve's steamcmd.zip in-process; a hidden `tar.exe` child is one more
 # shell-out behaviour engines score against an unsigned app.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }

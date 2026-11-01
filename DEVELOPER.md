@@ -116,6 +116,20 @@ Speed is a sum of small decisions, not one magic knob:
 | Absolute-offset writes, one handle per worker | No shared cursor, no seek contention between writers |
 | Hash-checked resume journal | Resumes skip finished files without re-reading gigabytes |
 
+### Multi-network scheduling
+
+Hyperion can bind chunk clients to more than one adapter, following the direct-download design used by [Plexo](https://github.com/anmolkapil/plexo):
+
+- `network_mode = auto` picks one physical adapter per IPv4 subnet. This prevents Wi-Fi + Ethernet on the same router from pretending to add bandwidth.
+- `selected` uses exactly the adapters listed in `network_ids`; `off` keeps the legacy default-route client.
+- Each selected adapter gets its own `reqwest::Client` with `local_address` set to that adapter's IPv4 address. Windows routes by source address, so the sockets leave through the intended interface.
+- The existing `max_workers` total is shared across the pool. A chunk takes the selected client with the fewest in-flight requests, so a faster link naturally takes more work.
+- If a selected adapter keeps failing, chunks make one final attempt through the default-route client and that adapter is marked down for the rest of the download.
+- The pool is only created when at least two adapters are selected; a single-adapter machine keeps the old behavior exactly.
+- `game_get_download_networks` exposes per-adapter bytes, chunks and average speed for the Downloads row.
+
+Same-subnet adapters share an upstream. A phone USB tether or a second WAN is what actually adds bandwidth.
+
 ### Queue semantics
 
 The UI inserts a `Queued` row and switches to Downloads before `game_install` has resolved. This keeps the app responsive while the backend resolves the manifest. The first `download-progress` event replaces the optimistic row; if the install command fails before that, the row becomes `Failed` with the error and a Retry action. Queued rows do not show a cancel button because there is no backend download to cancel yet.

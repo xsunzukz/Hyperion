@@ -21,6 +21,8 @@ import {
   SteamExtraContent,
   RunningGame,
   MysticLauncherStatus,
+  NetworkInfo,
+  NetworkProgress,
 } from '../types';
 
 export const isTauri = (): boolean => {
@@ -169,6 +171,8 @@ let mockSettings: AppSettings = {
   auto_update: true,
   auto_update_launcher: true,
   skip_update_check: false,
+  network_mode: 'auto',
+  network_ids: [],
   platform: 'Windows',
   steam_library_scan: false,
   close_to_tray: true,
@@ -509,6 +513,20 @@ export const settingsSave = async (settings: AppSettings): Promise<void> => {
     return invoke<void>('settings_save', { settings });
   }
   mockSettings = { ...settings };
+};
+
+export const networksList = async (): Promise<NetworkInfo[]> => {
+  if (isTauri()) {
+    return invoke<NetworkInfo[]>('networks_list');
+  }
+  return [];
+};
+
+export const networkProgress = async (appName: string): Promise<NetworkProgress[]> => {
+  if (isTauri()) {
+    return (await invoke<NetworkProgress[] | null>('game_get_download_networks', { appName })) ?? [];
+  }
+  return [];
 };
 
 export const diagnosticsGet = async (): Promise<SystemDiagnostics> => {

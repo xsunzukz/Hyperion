@@ -173,6 +173,15 @@ pub struct DownloadProgress {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkProgress {
+    pub id: String,
+    pub name: String,
+    pub bytes: u64,
+    pub speed_bytes_per_sec: u64,
+    pub chunks: u64,
+}
+
 /// Steam authentication status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SteamAuthStatus {
@@ -234,6 +243,10 @@ fn default_auto_update_launcher() -> bool {
     true
 }
 
+fn default_network_mode() -> String {
+    "auto".to_string()
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -247,6 +260,11 @@ pub struct AppSettings {
     #[serde(default = "default_auto_update_launcher")]
     pub auto_update_launcher: bool,
     pub skip_update_check: bool,
+    /// auto = one adapter per subnet, selected = only network_ids, off = legacy client.
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
+    #[serde(default)]
+    pub network_ids: Vec<String>,
     pub platform: String,
     #[serde(default)]
     pub steam_account: Option<String>,
@@ -291,6 +309,8 @@ impl Default for AppSettings {
             auto_update: true,
             auto_update_launcher: true,
             skip_update_check: false,
+            network_mode: default_network_mode(),
+            network_ids: Vec::new(),
             platform: "Windows".to_string(),
             steam_account: None,
             steam_id: None,
