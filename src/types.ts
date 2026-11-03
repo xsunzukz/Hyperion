@@ -81,6 +81,8 @@ export interface DownloadProgress {
   eta_seconds: number;
   progress_percent: number;
   current_file?: string;
+  /** Build being installed (the manifest's version) */
+  build_version?: string | null;
   error_message?: string;
 }
 

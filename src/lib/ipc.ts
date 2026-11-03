@@ -589,7 +589,18 @@ export const dauntlessInstall = async (installDir: string): Promise<string> => {
     return invoke<string>('dauntless_install', { installDir });
   }
   console.log('Mock: installing Dauntless into', installDir);
-  return `${installDir.replace(/[\\/]+$/, '')}\\Dauntless`;
+  const dir = installDir.replace(/[\\/]+$/, '');
+  return /[\\/]dauntless$/i.test(dir) ? dir : `${dir}\\Dauntless`;
+};
+
+/** "Use existing files": asks for the folder that already holds Dauntless and
+ *  returns the game folder in it, or null when the picker is closed. */
+export const dauntlessPickExisting = async (): Promise<string | null> => {
+  if (isTauri()) {
+    return invoke<string | null>('dauntless_pick_existing');
+  }
+  console.log('Mock: picking an existing Dauntless folder');
+  return 'D:\\Games\\Dauntless';
 };
 
 /** The window's close button while downloads run: the backend asks the UI,

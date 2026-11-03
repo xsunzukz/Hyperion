@@ -35,6 +35,7 @@ import {
   catalogGetGames,
   checkLauncherUpdate,
   dauntlessInstall,
+  dauntlessPickExisting,
   gameAdoptRunning,
   gameCancelDownload,
   gameGetAllDownloads,
@@ -61,7 +62,7 @@ import {
   steamSetCredentials,
   steamSetGuardCode,
 } from './lib/ipc';
-import { Download, Gamepad2, Github, Loader2, Play, ShieldCheck, Wrench } from 'lucide-react';
+import { Download, FolderSearch, Gamepad2, Github, Loader2, Play, ShieldCheck, Wrench } from 'lucide-react';
 import sponsorBanner from './assets/sponsor.webp';
 
 /** Dauntless for Mystic Paradox: always build 1.14.7, pinned in the backend
@@ -468,8 +469,12 @@ export const App: React.FC = () => {
     try {
       const list = await catalogGetGames(forceRefresh);
       if (forceRefresh || seq > appliedSeq.current) {
+        // A forced refresh that started before a newer load (a download that
+        // finished meanwhile) has an older install state: read it again.
+        const superseded = seq < appliedSeq.current;
         appliedSeq.current = Math.max(appliedSeq.current, seq);
         setGames(list.map(withFeaturedArt));
+        if (superseded) void loadGames(false);
       }
     } catch (e) {
       console.error('Failed to load games:', e);
@@ -611,10 +616,10 @@ export const App: React.FC = () => {
     setDauntlessPromptOpen(true);
   };
 
-  const handleDauntlessLocationConfirm = async (installDir: string) => {
+  const handleDauntlessLocationConfirm = async (installDir: string, existingCopy = false) => {
     setDauntlessPromptOpen(false);
     setDauntlessCheck(null);
-    queueDownload(SPONSOR_APP_NAME, SPONSOR_TITLE, SPONSOR_INSTALL_BYTES);
+    queueDownload(SPONSOR_APP_NAME, SPONSOR_TITLE, SPONSOR_INSTALL_BYTES, SPONSOR_BUILD);
     try {
       const folder = await dauntlessInstall(installDir);
       setDownloads((prev) => {
@@ -622,7 +627,12 @@ export const App: React.FC = () => {
         if (!current || current.status !== 'Queued') return prev;
         return { ...prev, [SPONSOR_APP_NAME]: { ...current, status: 'Analyzing' } };
       });
-      showNotification(`Installing Dauntless ${SPONSOR_BUILD} into ${folder}`, 'info');
+      showNotification(
+        existingCopy
+          ? `Checking the Dauntless files in ${folder} against ${SPONSOR_BUILD}`
+          : `Installing Dauntless ${SPONSOR_BUILD} into ${folder}`,
+        'info'
+      );
     } catch (e: any) {
       const message = e?.toString() || 'Unknown error';
       console.error('Dauntless install failed:', e);
@@ -636,6 +646,19 @@ export const App: React.FC = () => {
       });
       showNotification(`Dauntless install failed: ${message}`, 'error');
     }
+  };
+
+  /** "Use existing files": point Hyperion at a copy already on disk. Every file
+   *  is checked against 1.14.7 and only missing or different ones download. */
+  const handleDauntlessUseExisting = async () => {
+    let folder: string | null;
+    try {
+      folder = await dauntlessPickExisting();
+    } catch (e: any) {
+      showNotification(String(e?.message ?? e ?? 'That folder cannot be used'), 'error');
+      return;
+    }
+    if (folder) await handleDauntlessLocationConfirm(folder, true);
   };
 
   /** Checks every Dauntless file against the 1.14.7 manifest (and the exe
@@ -668,7 +691,7 @@ export const App: React.FC = () => {
    * manifest. The real `download-progress` event replaces this placeholder as
    * soon as the first chunk pipeline reports in.
    */
-  const queueDownload = (appName: string, title: string, totalBytes = 0) => {
+  const queueDownload = (appName: string, title: string, totalBytes = 0, buildVersion?: string) => {
     const placeholder: DownloadProgress = {
       app_name: appName,
       title,
@@ -680,6 +703,7 @@ export const App: React.FC = () => {
       speed_bytes_per_sec: 0,
       eta_seconds: 0,
       progress_percent: 0,
+      build_version: buildVersion,
     };
 
     setDownloads((prev) => {
@@ -1132,6 +1156,16 @@ export const App: React.FC = () => {
                       >
                         <ShieldCheck className="h-4 w-4 text-sky-300" />
                         <span>VERIFY FILES</span>
+                      </button>
+                    )}
+                    {!featuredInstalled && !featuredActiveDownload && (
+                      <button
+                        onClick={() => void handleDauntlessUseExisting()}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-white/15 bg-black/55 px-4 py-2.5 text-xs font-bold text-zinc-100 shadow-xl shadow-black/40 backdrop-blur-md transition hover:bg-black/75"
+                        title={`Already have Dauntless ${SPONSOR_BUILD}? Pick its folder: every file is checked and only what's missing downloads`}
+                      >
+                        <FolderSearch className="h-4 w-4 text-sky-300" />
+                        <span>USE EXISTING FILES</span>
                       </button>
                     )}
                     {featuredActiveDownload ? (

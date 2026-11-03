@@ -53,6 +53,25 @@ pub fn holds_install(dir: &Path) -> bool {
     dir.join("Dauntless.exe").is_file() || dir.join("Archon").is_dir()
 }
 
+/// The copy a picked folder points at: the folder itself, a `Dauntless` folder
+/// inside it, or the game folder around a picked `Archon` folder.
+pub fn find_existing(chosen: &Path) -> Option<PathBuf> {
+    if holds_install(chosen) {
+        return Some(chosen.to_path_buf());
+    }
+    let nested = chosen.join(TITLE);
+    if holds_install(&nested) {
+        return Some(nested);
+    }
+    let picked_archon = chosen
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("Archon"));
+    chosen
+        .parent()
+        .filter(|parent| picked_archon && holds_install(parent))
+        .map(Path::to_path_buf)
+}
+
 /// Where Dauntless goes for the folder the user picked. An existing copy is
 /// used as it is, so its matching files are kept; anything else follows the
 /// normal rule (a library folder gets a `Dauntless` subfolder).
@@ -118,6 +137,24 @@ mod tests {
         assert_eq!(target_dir(&copy, Path::new("D:\\Games"), None), copy);
         assert_eq!(target_dir(copy.parent().unwrap(), Path::new("D:\\Games"), None), copy);
         assert_eq!(target_dir(&copy.join(TITLE), Path::new("D:\\Games"), None), copy);
+    }
+
+    #[test]
+    fn an_existing_copy_is_found_from_the_folder_the_user_picks() {
+        let root = tempfile::tempdir().unwrap();
+        let copy = root.path().join("Games").join(TITLE);
+        std::fs::create_dir_all(copy.join("Archon").join("Binaries")).unwrap();
+        std::fs::write(copy.join("Dauntless.exe"), b"exe").unwrap();
+
+        assert_eq!(find_existing(&copy), Some(copy.clone()));
+        assert_eq!(find_existing(copy.parent().unwrap()), Some(copy.clone()));
+        assert_eq!(find_existing(&copy.join("Archon")), Some(copy.clone()));
+
+        // Nothing to reuse: no download is started into an empty folder
+        assert_eq!(find_existing(&copy.join("Archon").join("Binaries")), None);
+        let empty = root.path().join("Empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(find_existing(&empty), None);
     }
 
     #[test]

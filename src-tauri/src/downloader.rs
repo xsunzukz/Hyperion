@@ -327,6 +327,8 @@ impl DownloadManager {
             eta_seconds: 0,
             progress_percent: 0.0,
             current_file: None,
+            build_version: Some(manifest.meta.build_version.clone())
+                .filter(|version| !version.is_empty()),
             error_message: None,
         };
 

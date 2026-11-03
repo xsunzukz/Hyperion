@@ -829,6 +829,7 @@ impl SteamDownloadManager {
                 eta_seconds: 0,
                 progress_percent: 0.0,
                 current_file: Some("Initializing Steam download engine...".to_string()),
+                build_version: None,
                 error_message: None,
             };
             let _ = app_handle_clone.emit("download-progress", initial_p);
@@ -871,6 +872,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Steam session expired".to_string()),
+                        build_version: None,
                         error_message: Some(
                             "STEAM_LOGIN_FAILED: The saved Steam session expired. Enter your Steam password once to re-authorise; after that downloads stay silent."
                                 .to_string(),
@@ -900,6 +902,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some(trimmed.to_string()),
+                        build_version: None,
                         error_message: None,
                     };
                     let _ = app_handle_clone.emit("download-progress", p);
@@ -936,6 +939,7 @@ impl SteamDownloadManager {
                             eta_seconds: eta,
                             progress_percent: percent as f32,
                             current_file: Some("Downloading game files from Steam CDN...".to_string()),
+                            build_version: None,
                             error_message: None,
                         };
                         let _ = app_handle_clone.emit("download-progress", p);
@@ -954,6 +958,7 @@ impl SteamDownloadManager {
                             eta_seconds: 0,
                             progress_percent: percent as f32,
                             current_file: Some("Verifying Steam chunk integrity...".to_string()),
+                            build_version: None,
                             error_message: None,
                         };
                         let _ = app_handle_clone.emit("download-progress", p);
@@ -979,6 +984,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Authentication: Steam Guard approval required".to_string()),
+                        build_version: None,
                         error_message: specific_error_msg.clone(),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1014,6 +1020,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Ownership / license allocation failed".to_string()),
+                        build_version: None,
                         error_message: specific_error_msg.clone(),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1036,6 +1043,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Authentication failed".to_string()),
+                        build_version: None,
                         error_message: specific_error_msg.clone(),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1059,6 +1067,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Authentication rate-limited".to_string()),
+                        build_version: None,
                         error_message: specific_error_msg.clone(),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1130,6 +1139,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 100.0,
                         current_file: Some("Download & Installation Completed".to_string()),
+                        build_version: None,
                         error_message: None,
                     };
                     let _ = app_handle_clone.emit("download-progress", final_p);
@@ -1155,6 +1165,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Installation stopped".to_string()),
+                        build_version: None,
                         error_message: Some(err_msg),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1173,6 +1184,7 @@ impl SteamDownloadManager {
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: None,
+                        build_version: None,
                         error_message: Some(format!("SteamCMD process error: {}", e)),
                     };
                     let _ = app_handle_clone.emit("download-progress", err_p);
@@ -1212,6 +1224,7 @@ impl SteamDownloadManager {
             eta_seconds: 0,
             progress_percent: 0.0,
             current_file: None,
+            build_version: None,
             error_message: None,
         };
         let _ = app_handle.emit("download-progress", p);
@@ -1246,6 +1259,7 @@ impl SteamDownloadManager {
             eta_seconds: 0,
             progress_percent: 0.0,
             current_file: Some("Connecting to Steam client & allocating download...".to_string()),
+            build_version: None,
             error_message: None,
         };
         let _ = app_handle.emit("download-progress", initial_p);
@@ -1268,6 +1282,7 @@ impl SteamDownloadManager {
                             eta_seconds: 0,
                             progress_percent: 0.0,
                             current_file: Some("Steam client not found".to_string()),
+                            build_version: None,
                             error_message: Some(
                                 "Steam is not installed on this system. Install the Steam client and sign in to download this title."
                                     .to_string(),
@@ -1394,6 +1409,7 @@ impl SteamDownloadManager {
                                 eta_seconds: 0,
                                 progress_percent: 100.0,
                                 current_file: Some("Installation Completed via Steam Client".to_string()),
+                                build_version: None,
                                 error_message: None,
                             };
                             let _ = app_handle.emit("download-progress", final_p);
@@ -1411,6 +1427,7 @@ impl SteamDownloadManager {
                                 eta_seconds: eta,
                                 progress_percent: percent,
                                 current_file: Some(format!("Downloading via Steam Client ({})...", install_dir_name)),
+                                build_version: None,
                                 error_message: None,
                             };
                             let _ = app_handle.emit("download-progress", p);
@@ -1437,6 +1454,7 @@ impl SteamDownloadManager {
                                 eta_seconds: 0,
                                 progress_percent: 0.0,
                                 current_file: Some("Timed out waiting for Steam".to_string()),
+                                build_version: None,
                                 error_message: Some(
                                     "Steam did not start the download. Confirm the install prompt in the Steam client, then click Retry."
                                         .to_string(),
@@ -1461,6 +1479,7 @@ impl SteamDownloadManager {
                                 current_file: Some(
                                     "Waiting for Steam client to start the download...".to_string(),
                                 ),
+                                build_version: None,
                                 error_message: None,
                             },
                         );
@@ -1584,6 +1603,7 @@ async fn poll_download_progress(
                         eta_seconds: 0,
                         progress_percent: 0.0,
                         current_file: Some("Signing in to Steam and resolving the manifest…".to_string()),
+                        build_version: None,
                         error_message: None,
                     },
                 );
@@ -1657,6 +1677,7 @@ async fn poll_download_progress(
                 } else {
                     "Downloading from Steam CDN…".to_string()
                 }),
+                build_version: None,
                 error_message: None,
             },
         );

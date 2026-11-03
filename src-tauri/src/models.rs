@@ -170,6 +170,9 @@ pub struct DownloadProgress {
     pub eta_seconds: u64,
     pub progress_percent: f32,
     pub current_file: Option<String>,
+    /// Build being installed (the manifest's version), shown in the queue
+    #[serde(default)]
+    pub build_version: Option<String>,
     pub error_message: Option<String>,
 }
 

@@ -116,7 +116,17 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
             >
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="font-bold text-base text-white">{d.title}</h3>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-bold text-base text-white">{d.title}</h3>
+                    {d.build_version && (
+                      <span
+                        className="px-2 py-0.5 rounded-md border border-orange-500/30 bg-orange-500/10 font-mono text-[10px] text-orange-300"
+                        title="Build being installed"
+                      >
+                        build {d.build_version}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-2 mt-1.5 font-mono text-xs">
                     <span
                       className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${

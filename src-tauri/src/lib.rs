@@ -113,6 +113,7 @@ pub fn run() {
             commands::mystic_launcher_status,
             commands::launch_mystic_launcher,
             commands::dauntless_install,
+            commands::dauntless_pick_existing,
             commands::app_hide_to_tray,
             commands::app_quit,
             commands::open_path,

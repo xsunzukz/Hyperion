@@ -161,6 +161,8 @@ Mystic Paradox runs only Dauntless 1.14.7 (changelist 647472), while Epic serves
 - The manifest's own host serves only the manifest. Chunk CDN discovery used to fall back to it, which failed for everyone without an Epic session (`does not serve this build`); Dauntless no longer goes through that discovery at all.
 - `dauntless_install` (the card), `game_install("Jackal")`, a Direct Downloader install of a Jackal manifest and Repair all go through one path that refuses any manifest whose SHA-1 differs, so no route can install 2.1.1 or another build.
 - The chosen folder is used as is when it already holds a copy (`Dauntless.exe` or `Archon\`), or when it contains one in a `Dauntless` subfolder. Otherwise the usual rule adds a `Dauntless` folder. Existing files are hashed first and the queue shows that as *Checking files on disk*.
+- **Use existing files** on the card calls `dauntless_pick_existing`: a folder picker that accepts only a folder holding a copy (the folder itself, a `Dauntless` folder in it, or the folder around a picked `Archon`), so it never starts a fresh 15 GB download. The install then runs as above.
+- Download progress carries the manifest's `build_version`, which the queue shows beside the title.
 - Verify for Dauntless always uses the pinned manifest and also checks the exe's SHA-256. The launcher adds its own `winmm.dll` and `MysticParadox.dll` next to the exe; they are not in the manifest, so Verify ignores them and Repair never removes them.
 
 <br>

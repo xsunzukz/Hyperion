@@ -800,12 +800,6 @@ pub async fn catalog_get_games(
 /// so the first screen and the library cannot disagree.
 async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameItem>> {
     let settings = state.storage.get_settings()?;
-    let installed_games = state.storage.get_all_installed_games()?;
-    let installed_map: std::collections::HashMap<String, InstalledGame> = installed_games
-        .into_iter()
-        .map(|g| (g.app_name.clone(), g))
-        .collect();
-
     let signed_in = state.api_client.get_session().await.is_some();
     let cache_empty = state
         .storage
@@ -829,6 +823,15 @@ async fn load_catalog(state: &AppState, force_refresh: bool) -> Result<Vec<GameI
             }
         }
     }
+
+    // Read after the live refresh, which can take a while: a download that
+    // finished meanwhile must show as installed in this answer too.
+    let installed_map: std::collections::HashMap<String, InstalledGame> = state
+        .storage
+        .get_all_installed_games()?
+        .into_iter()
+        .map(|g| (g.app_name.clone(), g))
+        .collect();
 
     let mut items = cached_epic_items(state, &installed_map)?;
 
@@ -1271,6 +1274,43 @@ pub async fn dauntless_install(
     state: State<'_, Arc<AppState>>,
 ) -> Result<String> {
     start_dauntless_download(app_handle, Some(install_dir), &state).await
+}
+
+/// The Mystic Paradox card's "Use existing files": asks for the folder that
+/// already holds Dauntless and returns the game folder in it, or `None` when
+/// the picker is closed. Installing into it then checks every file against
+/// 1.14.7 and downloads only what is missing or different.
+#[tauri::command]
+pub async fn dauntless_pick_existing(state: State<'_, Arc<AppState>>) -> Result<Option<String>> {
+    let start = state
+        .storage
+        .get_settings()
+        .ok()
+        .map(|settings| PathBuf::from(settings.default_install_dir))
+        .filter(|dir| dir.is_dir());
+
+    let picked = tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Select your Dauntless folder (the one with Dauntless.exe)");
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_folder()
+    })
+    .await
+    .map_err(|e| AppError::General(e.to_string()))?;
+
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    crate::mystic::find_existing(&picked)
+        .map(|dir| Some(dir.to_string_lossy().to_string()))
+        .ok_or_else(|| {
+            AppError::Install(format!(
+                "No Dauntless in {}. Choose the folder that has Dauntless.exe in it.",
+                picked.display()
+            ))
+        })
 }
 
 // ==========================================
@@ -2023,6 +2063,7 @@ pub async fn game_cancel_download(
         eta_seconds: 0,
         progress_percent: 0.0,
         current_file: None,
+        build_version: None,
         error_message: None,
     };
     let _ = app_handle.emit("download-progress", p);

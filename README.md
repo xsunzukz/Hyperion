@@ -156,7 +156,8 @@ Hyperion checks for signed launcher updates at launch when **Settings → Launch
 Hyperion features the **Mystic Paradox Launcher** on the Discover screen.
 
 - **DOWNLOAD** asks where Dauntless should go, then downloads build **1.14.7.647472** (15.4 GB, 611 files) from Epic's own CDN. No Epic sign-in is needed for it, and Hyperion never installs another Dauntless build: the manifest must match the SHA-1 Mystic Paradox publishes.
-- **Already have 1.14.7?** Choose its folder (the one with `Dauntless.exe`). Every file is hashed against the manifest and only missing or different files are downloaded.
+- **Already have 1.14.7?** Press **USE EXISTING FILES** and pick its folder (the one with `Dauntless.exe`). Every file is hashed against the manifest, the game is added to your Library, and only missing or different files are downloaded.
+- While it downloads, the queue shows the build being installed (`build 1.14.7.647472`).
 - **VERIFY FILES** checks every file against 1.14.7, and the game executable against the SHA-256 the Mystic Paradox launcher accepts. **Repair** re-downloads only the files that failed.
 - Once the game is installed, **PLAY** opens the Mystic Paradox Launcher.
 - If the launcher isn't installed, **GET LAUNCHER** opens the [Mystic Paradox releases](https://github.com/pranav158/Mystic-Paradox/releases) page so you can download it.
