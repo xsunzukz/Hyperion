@@ -176,7 +176,8 @@ export interface AppSettings {
   steam_id?: string;
   /** Opt-in: read this PC's Steam library files to list Steam games */
   steam_library_scan: boolean;
-  /** Closing the window keeps Hyperion running in the system tray */
+  /** Closing the window always hides Hyperion to the system tray (off: it quits,
+   *  asking first while a download runs) */
   close_to_tray: boolean;
   /** Set by the backend once the first-launch bootstrap has finished */
   bootstrap_done: boolean;

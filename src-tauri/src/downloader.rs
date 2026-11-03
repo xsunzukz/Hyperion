@@ -445,11 +445,24 @@ impl DownloadManager {
                 (path.clone(), fm.file_size, fm.hash, vouched)
             })
             .collect();
+        // Hashing a whole existing copy (another tool's install, a folder from
+        // another PC) takes minutes, so the queue shows how far it has got.
+        if !created_dir {
+            let mut p = progress.lock().await;
+            p.status = DownloadStatus::Verifying;
+            p.current_file = Some("Checking files already in the folder…".to_string());
+            let _ = app_handle.emit("download-progress", p.clone());
+        }
         let cancel_check = cancel_flag.clone();
+        let check_progress = progress.clone();
+        let check_handle = app_handle.clone();
+        let check_total = checks.len();
         let already_done: Vec<bool> = tokio::task::spawn_blocking(move || {
+            let mut last_report = Instant::now();
             checks
                 .into_iter()
-                .map(|(path, size, hash, vouched)| {
+                .enumerate()
+                .map(|(index, (path, size, hash, vouched))| {
                     if cancel_check.load(Ordering::SeqCst) {
                         return false;
                     }
@@ -459,9 +472,25 @@ impl DownloadManager {
                     if !meta.is_file() || meta.len() != size {
                         return false;
                     }
-                    vouched
-                        || (!trust_journal
-                            && Installer::compute_file_sha1(&path).is_ok_and(|h| h == hash))
+                    if vouched {
+                        return true;
+                    }
+                    if trust_journal {
+                        return false;
+                    }
+                    if last_report.elapsed() >= Duration::from_millis(250) {
+                        last_report = Instant::now();
+                        let mut p = check_progress.blocking_lock();
+                        p.progress_percent = index as f32 * 100.0 / check_total.max(1) as f32;
+                        p.current_file = Some(format!(
+                            "Checking files already in the folder ({} of {}): {}",
+                            index + 1,
+                            check_total,
+                            path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                        ));
+                        let _ = check_handle.emit("download-progress", p.clone());
+                    }
+                    Installer::compute_file_sha1(&path).is_ok_and(|h| h == hash)
                 })
                 .collect()
         })
@@ -588,6 +617,8 @@ impl DownloadManager {
             p.status = DownloadStatus::Downloading;
             p.total_chunks = total_needed_chunks;
             p.total_bytes = total_needed_bytes;
+            p.progress_percent = 0.0;
+            p.current_file = None;
             let _ = app_handle.emit("download-progress", p.clone());
         }
 

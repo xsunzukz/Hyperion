@@ -71,7 +71,7 @@ Every download asks where it should go, and you can remember that folder as your
 
 ### 🖥️ Built to stay out of the way
 
-A native Rust core and a fast, quiet interface. Close the window and downloads keep moving in the system tray — or turn that off in Settings. Signed launcher updates check in the background and only restart when you choose.
+A native Rust core and a fast, quiet interface. Closing the window quits, but if a download is running Hyperion asks first: keep downloading in the system tray, or quit. Only one copy of Hyperion runs at a time. Signed launcher updates check in the background and only restart when you choose.
 
 </td>
 <td width="50%" valign="top">
@@ -134,12 +134,12 @@ Your Epic profile, Steam sign-in, Steam library scan and sign-out now live toget
 1. **Download** `Hyperion_<version>_x64-setup.exe` from the [latest release](https://github.com/xsunzukz/Hyperion/releases/latest). Prefer no installer? Grab the `_standalone.exe`; managed machines can use the `.msi`.
 2. **Run it.** The build is not code-signed yet, so Windows SmartScreen asks first: choose **More info → Run anyway**.
 3. **Sign in with Epic.** Epic's own login page opens; Hyperion never sees your password.
-4. **Install and play.** Pick a game from your library and choose where it should go; tick **Remember** to use that folder for future downloads. For the featured Dauntless build, install the game here first; once it's installed, PLAY opens the Mystic Paradox Launcher, or sends you to its releases page if the launcher isn't installed.
+4. **Install and play.** Pick a game from your library and choose where it should go; tick **Remember** to use that folder for future downloads. For the featured Dauntless build, press **DOWNLOAD** on its card and choose a folder; once it's installed, PLAY opens the Mystic Paradox Launcher, or sends you to its releases page if the launcher isn't installed.
 
 Steam is optional. You only need it for Steam titles and in-app Steam downloads; your Epic library works without it.
 
 > [!TIP]
-> By default, closing the window keeps Hyperion running in the system tray so downloads finish. Prefer a normal exit? Turn off **Settings → Window & Tray → Close app to minimize to system tray**.
+> Closing the window quits Hyperion. While a download is running you're asked whether to keep it going in the system tray or quit. Want it in the tray every time? Turn on **Settings → Window & Tray → Always keep running in the system tray when closed**.
 
 Hyperion checks for signed launcher updates at launch when **Settings → Launcher Updates** is enabled. You always see the new version, its notes, and choose when to install and restart.
 
@@ -155,7 +155,9 @@ Hyperion checks for signed launcher updates at launch when **Settings → Launch
 
 Hyperion features the **Mystic Paradox Launcher** on the Discover screen.
 
-- If Dauntless isn't installed, **INSTALL** downloads the 1.14.7 build through Hyperion.
+- **DOWNLOAD** asks where Dauntless should go, then downloads build **1.14.7.647472** (15.4 GB, 611 files) from Epic's own CDN. No Epic sign-in is needed for it, and Hyperion never installs another Dauntless build: the manifest must match the SHA-1 Mystic Paradox publishes.
+- **Already have 1.14.7?** Choose its folder (the one with `Dauntless.exe`). Every file is hashed against the manifest and only missing or different files are downloaded.
+- **VERIFY FILES** checks every file against 1.14.7, and the game executable against the SHA-256 the Mystic Paradox launcher accepts. **Repair** re-downloads only the files that failed.
 - Once the game is installed, **PLAY** opens the Mystic Paradox Launcher.
 - If the launcher isn't installed, **GET LAUNCHER** opens the [Mystic Paradox releases](https://github.com/pranav158/Mystic-Paradox/releases) page so you can download it.
 - The launcher signs in, verifies your Dauntless install, keeps the runtime current, and launches the game.
@@ -216,7 +218,7 @@ Yes. Point Hyperion at the existing install folder. It hashes what is already th
 
 <br>
 
-Not by default. Hyperion keeps running in the system tray. If you would rather quit completely when the window closes, turn off **Close app to minimize to system tray** in Settings.
+Hyperion asks first. Pressing close while a download runs shows a prompt: **Keep Downloading in Tray** lets it finish in the background, **Quit Anyway** stops it (finished files are kept, so starting it again continues from there). With no download running, close simply quits. To always go to the tray instead, turn on **Always keep running in the system tray when closed** in Settings.
 
 </details>
 

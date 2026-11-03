@@ -361,17 +361,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-start justify-between gap-5 pt-1">
             <div className="min-w-0">
               <div className="text-xs font-semibold text-zinc-200">
-                Close app to minimize to system tray
+                Always keep running in the system tray when closed
               </div>
               <p className="mt-1 max-w-lg text-xs leading-relaxed text-zinc-400">
-                Closing the window keeps Hyperion running in the system tray, so active downloads
-                and running games carry on. Turn this off to quit Hyperion completely when the
-                window is closed.
+                Off by default: the close button quits Hyperion. While a download is running you are
+                asked first, and can keep it going in the tray or quit.
               </p>
               <p className="mt-2 text-[11px] text-zinc-500">
                 {settings.close_to_tray
-                  ? 'Hyperion will keep running in the background when closed.'
-                  : 'Closing the window will exit Hyperion and stop active downloads.'}
+                  ? 'Closing the window always hides Hyperion to the tray.'
+                  : 'Closing the window quits Hyperion, asking first if a download is running.'}
               </p>
             </div>
 
@@ -379,7 +378,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               type="button"
               role="switch"
               aria-checked={settings.close_to_tray}
-              aria-label="Close app to minimize to system tray"
+              aria-label="Always keep running in the system tray when closed"
               onClick={() =>
                 setSettings({ ...settings, close_to_tray: !settings.close_to_tray })
               }

@@ -368,7 +368,9 @@ impl Storage {
                     settings.steam_password_enc = if val.is_empty() { None } else { Some(val) }
                 }
                 "steam_library_scan" => settings.steam_library_scan = val == "true",
-                "close_to_tray" => settings.close_to_tray = val == "true",
+                // A new key: the old `close_to_tray` was saved as on for
+                // everyone when hiding to the tray was the default.
+                "close_to_tray_always" => settings.close_to_tray = val == "true",
                 "bootstrap_done" => settings.bootstrap_done = val == "true",
                 _ => {}
             }
@@ -402,7 +404,7 @@ impl Storage {
                 settings.steam_password_enc.clone().unwrap_or_default(),
             ),
             ("steam_library_scan", settings.steam_library_scan.to_string()),
-            ("close_to_tray", settings.close_to_tray.to_string()),
+            ("close_to_tray_always", settings.close_to_tray.to_string()),
             ("bootstrap_done", settings.bootstrap_done.to_string()),
         ];
 

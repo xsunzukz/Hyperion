@@ -7,6 +7,12 @@ interface InstallLocationDialogProps {
   /** Starts the download after the user confirms the folder. */
   onConfirm: (installDir: string) => Promise<void> | void;
   onClose: () => void;
+  /** Build facts shown under the heading (e.g. version and size). */
+  details?: React.ReactNode;
+  /** Replaces the default "a folder will be created" line under the path. */
+  folderHint?: React.ReactNode;
+  /** Extra guidance shown above the buttons. */
+  note?: React.ReactNode;
 }
 
 /**
@@ -17,6 +23,9 @@ export const InstallLocationDialog: React.FC<InstallLocationDialogProps> = ({
   title,
   onConfirm,
   onClose,
+  details,
+  folderHint,
+  note,
 }) => {
   const [installDir, setInstallDir] = useState('');
   const [remember, setRemember] = useState(false);
@@ -113,6 +122,7 @@ export const InstallLocationDialog: React.FC<InstallLocationDialogProps> = ({
                 Where should <span className="font-semibold text-zinc-200">{title}</span> be
                 downloaded?
               </p>
+              {details && <div className="mt-2">{details}</div>}
             </div>
           </div>
 
@@ -147,11 +157,15 @@ export const InstallLocationDialog: React.FC<InstallLocationDialogProps> = ({
               </button>
             </div>
             <p className="text-[11px] leading-relaxed text-zinc-500">
-              Hyperion will create a{' '}
-              <span className="font-mono text-zinc-400">
-                {title.replace(/[^a-zA-Z0-9 _-]/g, '_')}
-              </span>{' '}
-              folder inside this location when needed.
+              {folderHint ?? (
+                <>
+                  Hyperion will create a{' '}
+                  <span className="font-mono text-zinc-400">
+                    {title.replace(/[^a-zA-Z0-9 _-]/g, '_')}
+                  </span>{' '}
+                  folder inside this location when needed.
+                </>
+              )}
             </p>
           </div>
 
@@ -186,6 +200,8 @@ export const InstallLocationDialog: React.FC<InstallLocationDialogProps> = ({
               </span>
             </span>
           </label>
+
+          {note}
 
           {error && (
             <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">

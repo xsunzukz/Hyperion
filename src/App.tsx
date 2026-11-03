@@ -15,6 +15,7 @@ import { SteamEngineLoginModal } from './components/SteamEngineLoginModal';
 import { CancelDownloadDialog } from './components/CancelDownloadDialog';
 import { InstallLocationDialog } from './components/InstallLocationDialog';
 import { LauncherUpdateDialog } from './components/LauncherUpdateDialog';
+import { CloseWhileDownloadingDialog } from './components/CloseWhileDownloadingDialog';
 import {
   AppSettings,
   DownloadProgress,
@@ -22,14 +23,18 @@ import {
   NavigationTab,
   RunningGame,
   UserProfile,
+  VerificationResult,
   ViewMode,
 } from './types';
 import {
   appBootstrap,
+  appHideToTray,
+  appQuit,
   authLogout,
   authResumeSession,
   catalogGetGames,
   checkLauncherUpdate,
+  dauntlessInstall,
   gameAdoptRunning,
   gameCancelDownload,
   gameGetAllDownloads,
@@ -37,11 +42,14 @@ import {
   gameInstall,
   gameLaunch,
   gamePauseDownload,
+  gameRepair,
   gameResumeDownload,
   gameStop,
   gameUninstall,
+  gameVerify,
   installLauncherUpdate,
   launchMysticLauncher,
+  listenCloseRequested,
   listenToDownloadProgress,
   mysticLauncherStatus,
   openPath,
@@ -53,14 +61,16 @@ import {
   steamSetCredentials,
   steamSetGuardCode,
 } from './lib/ipc';
-import { Download, Gamepad2, Github, Loader2, Play } from 'lucide-react';
+import { Download, Gamepad2, Github, Loader2, Play, ShieldCheck, Wrench } from 'lucide-react';
 import sponsorBanner from './assets/sponsor.webp';
 
-/** Featured community build published as a bare Epic manifest */
-const SPONSOR_MANIFEST_URL = 'https://api.mysticfox.dev/v2/Dauntless_1.14.7.647472.manifest';
-/** The app name inside that manifest: Epic's codename for Dauntless */
+/** Dauntless for Mystic Paradox: always build 1.14.7, pinned in the backend
+ *  (src-tauri/src/mystic.rs). Epic's codename for the game is Jackal. */
 const SPONSOR_APP_NAME = 'Jackal';
 const SPONSOR_TITLE = 'Dauntless';
+const SPONSOR_BUILD = '1.14.7.647472';
+/** Installed size of that build (611 files), for the queue before it reports in */
+const SPONSOR_INSTALL_BYTES = 16_521_629_423;
 const MYSTIC_PARADOX_RELEASES_URL = 'https://github.com/pranav158/Mystic-Paradox/releases';
 
 /** Statuses that mean a queue entry is already in flight. */
@@ -114,6 +124,17 @@ export const App: React.FC = () => {
   const [customManifestUrl, setCustomManifestUrl] = useState<string | null>(null);
   // Game waiting for the user to pick an install folder.
   const [installPromptGame, setInstallPromptGame] = useState<GameItem | null>(null);
+  // Dauntless asks for its folder too, then installs the pinned build directly
+  const [dauntlessPromptOpen, setDauntlessPromptOpen] = useState(false);
+  // Inline Verify / Repair on the Mystic Paradox card
+  const [dauntlessCheck, setDauntlessCheck] = useState<
+    | { state: 'checking' | 'repairing' }
+    | { state: 'done'; result: VerificationResult; repairStarted: boolean }
+    | { state: 'error'; message: string }
+    | null
+  >(null);
+  // Close button pressed while downloads run: how many the backend counted
+  const [closePromptCount, setClosePromptCount] = useState<number | null>(null);
   const [steamAuthRequest, setSteamAuthRequest] = useState<{
     mode: 'full' | 'guard';
     appName: string;
@@ -286,6 +307,21 @@ export const App: React.FC = () => {
     };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
+  // The close button quits Hyperion; the backend asks here first only while
+  // downloads are running.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listenCloseRequested((count) => setClosePromptCount(count)).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   // Collapse state is mirrored to localStorage so the sidebar keeps its width
@@ -562,12 +598,69 @@ export const App: React.FC = () => {
     }
   };
 
-  /** Featured build: opens the Direct Downloader with this manifest pre-filled,
-   *  so the install runs through the same verified preview as a local file. */
+  /** Featured build: ask where Dauntless goes (or where a copy already is),
+   *  like any other game, then download 1.14.7 straight away. */
   const handleSponsorInstall = () => {
-    setCustomManifestGame(null);
-    setCustomManifestUrl(SPONSOR_MANIFEST_URL);
-    setIsCustomManifestOpen(true);
+    const current = downloads[SPONSOR_APP_NAME];
+    if (current && isLiveDownload(current.status)) {
+      setActiveTab('downloads');
+      setSelectedGame(null);
+      return;
+    }
+    setSelectedGame(null);
+    setDauntlessPromptOpen(true);
+  };
+
+  const handleDauntlessLocationConfirm = async (installDir: string) => {
+    setDauntlessPromptOpen(false);
+    setDauntlessCheck(null);
+    queueDownload(SPONSOR_APP_NAME, SPONSOR_TITLE, SPONSOR_INSTALL_BYTES);
+    try {
+      const folder = await dauntlessInstall(installDir);
+      setDownloads((prev) => {
+        const current = prev[SPONSOR_APP_NAME];
+        if (!current || current.status !== 'Queued') return prev;
+        return { ...prev, [SPONSOR_APP_NAME]: { ...current, status: 'Analyzing' } };
+      });
+      showNotification(`Installing Dauntless ${SPONSOR_BUILD} into ${folder}`, 'info');
+    } catch (e: any) {
+      const message = e?.toString() || 'Unknown error';
+      console.error('Dauntless install failed:', e);
+      setDownloads((prev) => {
+        const current = prev[SPONSOR_APP_NAME];
+        if (!current || (current.status !== 'Queued' && current.status !== 'Analyzing')) return prev;
+        return {
+          ...prev,
+          [SPONSOR_APP_NAME]: { ...current, status: 'Failed', error_message: message },
+        };
+      });
+      showNotification(`Dauntless install failed: ${message}`, 'error');
+    }
+  };
+
+  /** Checks every Dauntless file against the 1.14.7 manifest (and the exe
+   *  against the hash the Mystic Paradox launcher accepts). */
+  const handleDauntlessVerify = async () => {
+    setDauntlessCheck({ state: 'checking' });
+    try {
+      const result = await gameVerify(SPONSOR_APP_NAME);
+      setDauntlessCheck({ state: 'done', result, repairStarted: false });
+    } catch (e: any) {
+      setDauntlessCheck({ state: 'error', message: String(e?.message ?? e ?? 'Verification failed') });
+    }
+  };
+
+  const handleDauntlessRepair = async () => {
+    setDauntlessCheck({ state: 'repairing' });
+    try {
+      const result = await gameRepair(SPONSOR_APP_NAME);
+      setDauntlessCheck({ state: 'done', result, repairStarted: !result.is_valid });
+      if (!result.is_valid) {
+        showNotification('Repairing Dauntless: only the bad files are downloaded', 'info');
+      }
+    } catch (e: any) {
+      setDauntlessCheck({ state: 'error', message: String(e?.message ?? e ?? 'Repair failed') });
+    }
   };
 
   /**
@@ -858,9 +951,7 @@ export const App: React.FC = () => {
     });
   }, [games, searchQuery, selectedFilter, platformFilter]);
 
-  const activeDownloadsList = Object.values(downloads).filter(
-    (d) => d.status === 'Queued' || d.status === 'Downloading' || d.status === 'Analyzing' || d.status === 'Paused'
-  );
+  const activeDownloadsList = Object.values(downloads).filter((d) => isLiveDownload(d.status));
 
   const runningGamesList = useMemo(() => Object.values(runningGames), [runningGames]);
 
@@ -971,11 +1062,78 @@ export const App: React.FC = () => {
                         Dauntless
                       </h2>
                       <p className="mt-2 max-w-md text-xs leading-relaxed text-zinc-300/90">
-                        1.14.7 community server build — install Dauntless here, then play it through
-                        the Mystic Paradox Launcher.
+                        Dauntless 1.14.7 for the Mystic Paradox servers, 15.4 GB from Epic's CDN.
+                        Install it here, then play through the Mystic Paradox Launcher.
                       </p>
+                      {dauntlessCheck && (
+                        <div
+                          className={`mt-2.5 inline-flex max-w-md flex-wrap items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11px] backdrop-blur-md ${
+                            dauntlessCheck.state === 'error' ||
+                            (dauntlessCheck.state === 'done' && !dauntlessCheck.result.is_valid)
+                              ? 'border-rose-400/30 bg-black/60 text-rose-200'
+                              : dauntlessCheck.state === 'done'
+                              ? 'border-emerald-400/30 bg-black/60 text-emerald-200'
+                              : 'border-white/15 bg-black/60 text-zinc-200'
+                          }`}
+                          role="status"
+                        >
+                          {dauntlessCheck.state === 'checking' && (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <span>Checking all 611 files against build {SPONSOR_BUILD}…</span>
+                            </>
+                          )}
+                          {dauntlessCheck.state === 'repairing' && (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              <span>Starting repair…</span>
+                            </>
+                          )}
+                          {dauntlessCheck.state === 'error' && <span>{dauntlessCheck.message}</span>}
+                          {dauntlessCheck.state === 'done' &&
+                            (dauntlessCheck.result.is_valid ? (
+                              <span>
+                                All {dauntlessCheck.result.total_files} files match build {SPONSOR_BUILD}.
+                                Ready for Mystic Paradox.
+                              </span>
+                            ) : dauntlessCheck.repairStarted ? (
+                              <span>
+                                Repair started: downloading{' '}
+                                {dauntlessCheck.result.missing_files.length +
+                                  dauntlessCheck.result.corrupt_files.length}{' '}
+                                files.
+                              </span>
+                            ) : (
+                              <>
+                                <span>
+                                  {dauntlessCheck.result.missing_files.length} missing,{' '}
+                                  {dauntlessCheck.result.corrupt_files.length} different from 1.14.7.
+                                </span>
+                                <button
+                                  onClick={() => void handleDauntlessRepair()}
+                                  className="flex cursor-pointer items-center gap-1 rounded-md bg-rose-500/80 px-2 py-0.5 font-bold text-white transition hover:bg-rose-500"
+                                >
+                                  <Wrench className="h-3 w-3" />
+                                  <span>Repair</span>
+                                </button>
+                              </>
+                            ))}
+                        </div>
+                      )}
                     </div>
 
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    {featuredInstalled && !featuredActiveDownload && (
+                      <button
+                        onClick={() => void handleDauntlessVerify()}
+                        disabled={dauntlessCheck?.state === 'checking' || dauntlessCheck?.state === 'repairing'}
+                        className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl border border-white/15 bg-black/55 px-4 py-2.5 text-xs font-bold text-zinc-100 shadow-xl shadow-black/40 backdrop-blur-md transition hover:bg-black/75 disabled:cursor-wait disabled:opacity-60"
+                        title={`Check every file against Dauntless ${SPONSOR_BUILD}`}
+                      >
+                        <ShieldCheck className="h-4 w-4 text-sky-300" />
+                        <span>VERIFY FILES</span>
+                      </button>
+                    )}
                     {featuredActiveDownload ? (
                       <button
                         onClick={() => setActiveTab('downloads')}
@@ -988,6 +1146,8 @@ export const App: React.FC = () => {
                             ? `DOWNLOADING ${featuredActiveDownload.progress_percent.toFixed(0)}%`
                             : featuredActiveDownload.status === 'Paused'
                             ? 'PAUSED'
+                            : featuredActiveDownload.status === 'Verifying'
+                            ? 'CHECKING FILES'
                             : 'PREPARING'}
                         </span>
                       </button>
@@ -995,10 +1155,10 @@ export const App: React.FC = () => {
                       <button
                         onClick={handleSponsorInstall}
                         className="flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-white px-5 py-2.5 text-xs font-extrabold text-black shadow-xl shadow-black/40 transition hover:scale-105 hover:bg-zinc-200"
-                        title="Install Dauntless 1.14.7"
+                        title={`Download Dauntless ${SPONSOR_BUILD}, or use a copy you already have`}
                       >
                         <Download className="h-4 w-4" />
-                        <span>INSTALL</span>
+                        <span>DOWNLOAD</span>
                       </button>
                     ) : mysticLauncherInstalled === null ? (
                       <button
@@ -1027,6 +1187,7 @@ export const App: React.FC = () => {
                         <span>GET LAUNCHER</span>
                       </button>
                     )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1183,11 +1344,8 @@ export const App: React.FC = () => {
                 if (game) handleInstall(game);
                 else gameInstall(appName);
               }}
+              fixedSource={[SPONSOR_APP_NAME]}
               onConfigure={(appName) => {
-                if (appName === SPONSOR_APP_NAME) {
-                  handleSponsorInstall();
-                  return;
-                }
                 const game = games.find((g) => g.app_name === appName);
                 setCustomManifestGame(game || null);
                 setCustomManifestUrl(null);
@@ -1250,7 +1408,6 @@ export const App: React.FC = () => {
           }}
           presetGame={customManifestGame}
           presetManifestUrl={customManifestUrl}
-          presetTitle={customManifestUrl === SPONSOR_MANIFEST_URL ? SPONSOR_TITLE : null}
           onRequestSteamLogin={() => requestSteamAuth('full', '', '')}
           steamAuthVersion={steamAuthVersion}
           onInstallStarted={(appName) => {
@@ -1310,6 +1467,59 @@ export const App: React.FC = () => {
           title={installPromptGame.title}
           onConfirm={handleInstallLocationConfirm}
           onClose={() => setInstallPromptGame(null)}
+        />
+      )}
+
+      {/* Dauntless: pick a folder (or an existing copy), then install 1.14.7 */}
+      {dauntlessPromptOpen && (
+        <InstallLocationDialog
+          title={SPONSOR_TITLE}
+          onConfirm={handleDauntlessLocationConfirm}
+          onClose={() => setDauntlessPromptOpen(false)}
+          details={
+            <div className="flex flex-wrap gap-1.5 font-mono text-[10px]">
+              <span className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-0.5 text-orange-300">
+                build {SPONSOR_BUILD}
+              </span>
+              <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                15.4 GB · 611 files
+              </span>
+              <span className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-zinc-300">
+                from Epic's CDN
+              </span>
+            </div>
+          }
+          folderHint={
+            <>
+              Hyperion will create a <span className="font-mono text-zinc-400">Dauntless</span> folder
+              here, unless this folder already holds Dauntless.
+            </>
+          }
+          note={
+            <div className="flex items-start gap-2.5 rounded-xl border border-sky-500/25 bg-sky-500/5 p-3 text-[11px] leading-relaxed text-sky-200/90">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" />
+              <span>
+                <span className="font-semibold text-sky-200">Already have Dauntless 1.14.7?</span>{' '}
+                Choose its folder (the one with <span className="font-mono">Dauntless.exe</span>). Every
+                file is checked against the 1.14.7 manifest first, and only missing or different files
+                are downloaded.
+              </span>
+            </div>
+          }
+        />
+      )}
+
+      {/* Close button while downloads run: keep going in the tray, or quit */}
+      {closePromptCount !== null && (
+        <CloseWhileDownloadingDialog
+          downloads={activeDownloadsList}
+          extraCount={Math.max(0, closePromptCount - activeDownloadsList.length)}
+          onKeepInTray={async () => {
+            setClosePromptCount(null);
+            await appHideToTray();
+          }}
+          onQuit={appQuit}
+          onClose={() => setClosePromptCount(null)}
         />
       )}
 

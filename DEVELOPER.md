@@ -8,6 +8,7 @@ This is the technical companion to the player-facing [README](README.md). It cov
 - [Startup, settings and the tray](#startup-settings-and-the-tray)
 - [Download pipeline](#download-pipeline)
 - [Protocol notes](#protocol-notes)
+- [Dauntless 1.14.7 (Mystic Paradox)](#dauntless-1147-mystic-paradox)
 - [Verify, repair and updates](#verify-repair-and-updates)
 - [Steam integration](#steam-integration)
 - [Security model](#security-model)
@@ -55,9 +56,9 @@ Settings are stored as key/value rows in SQLite and returned as `AppSettings`. S
 | `default_install_dir` | detected drive | Base folder for new installs. The install-location prompt can update it when **Remember this as my default install location** is ticked. |
 | `auto_update_launcher` | `true` | Check the signed launcher update feed at startup. A found update is shown in a prompt; it is never installed without confirmation. |
 | `steam_library_scan` | `false` | Reads Steam's local library files to list installed/owned Steam games. Opt-in because antivirus engines can object to launchers reading those files. |
-| `close_to_tray` | `true` | When the window's close button is pressed, hide to the system tray and keep downloads/games running. When `false`, the close is not prevented and the process exits normally. |
+| `close_to_tray` | `false` | Stored as `close_to_tray_always` (the old `close_to_tray` key was saved as on for everyone and is ignored). On: the close button always hides to the tray. Off: close quits, unless Epic or Steam downloads are active — then the UI gets a `close-requested` event and asks: keep downloading in the tray (`app_hide_to_tray`) or quit (`app_quit`). |
 
-Normal game installs go through the install-location prompt first; the chosen folder is passed to `game_install` as `install_dir`, and the backend still adds a per-game folder when the selected path is a library root. `close_to_tray` is read from storage inside `WindowEvent::CloseRequested` in `src-tauri/src/lib.rs`, so changing it in Settings affects the next close without restarting.
+Normal game installs go through the install-location prompt first; the chosen folder is passed to `game_install` as `install_dir`, and the backend still adds a per-game folder when the selected path is a library root. `WindowEvent::CloseRequested` in `src-tauri/src/lib.rs` always prevents the close, then reads `close_to_tray` and the active download count and hides, asks or exits — so changing the setting affects the next close without restarting. A second launch is stopped by `tauri-plugin-single-instance`, which raises the running window instead.
 
 <br>
 
@@ -147,6 +148,23 @@ The UI inserts a `Queued` row and switches to Downloads before `game_install` ha
 
 <br>
 
+## Dauntless 1.14.7 (Mystic Paradox)
+
+Mystic Paradox runs only Dauntless 1.14.7 (changelist 647472), while Epic serves 2.1.1 for the game today. `src-tauri/src/mystic.rs` pins everything about it, following Mystic Paradox's own [install guide](https://github.com/pranav158/Mystic-Paradox/blob/main/docs/INSTALLING_DAUNTLESS.md):
+
+| Pinned value | |
+|---|---|
+| Manifest | `https://api.mysticfox.dev/v2/Dauntless_1.14.7.647472.manifest`, SHA-1 `aa70748e4c0a776a991f2bac10ad342adaa31476` |
+| Chunks | `…/Builds/Org/o-krlzxj88qrtb69fredeuaf887bl5az/Jackal/default` on Epic's CDN hosts, tried in order; they serve the chunks without an Epic session |
+| Game exe | `Archon/Binaries/Win64/Dauntless-Win64-Shipping.exe`, SHA-256 `f3f95fbf…fbb66b` (what the Mystic Paradox launcher accepts) |
+
+- The manifest's own host serves only the manifest. Chunk CDN discovery used to fall back to it, which failed for everyone without an Epic session (`does not serve this build`); Dauntless no longer goes through that discovery at all.
+- `dauntless_install` (the card), `game_install("Jackal")`, a Direct Downloader install of a Jackal manifest and Repair all go through one path that refuses any manifest whose SHA-1 differs, so no route can install 2.1.1 or another build.
+- The chosen folder is used as is when it already holds a copy (`Dauntless.exe` or `Archon\`), or when it contains one in a `Dauntless` subfolder. Otherwise the usual rule adds a `Dauntless` folder. Existing files are hashed first and the queue shows that as *Checking files on disk*.
+- Verify for Dauntless always uses the pinned manifest and also checks the exe's SHA-256. The launcher adds its own `winmm.dll` and `MysticParadox.dll` next to the exe; they are not in the manifest, so Verify ignores them and Repair never removes them.
+
+<br>
+
 ## Verify, repair and updates
 
 | Action | What happens |
@@ -192,7 +210,7 @@ A launcher does several things antivirus heuristics dislike, so the choices here
 | **Light process checks** | A known game PID is watched with `OpenProcess(SYNCHRONIZE)`; other running games are found by name, and only processes whose name matches an executable in that game's folder are opened |
 | **SteamCMD** | Valve's own signed tool, downloaded only when Steam is first used. "Download an executable, then run it" is still a pattern scanners watch for — that is what it is |
 
-`close_to_tray` only changes whether the window hides or the app exits. It does not create a service, scheduled task or startup entry.
+`close_to_tray` and the close prompt only decide whether the window hides or the app exits. Neither creates a service, scheduled task or startup entry.
 
 > [!IMPORTANT]
 > The build is **not code-signed yet**, so SmartScreen warns and some antivirus products are cautious with it. If yours flags Hyperion or `steamcmd.exe`, add an exclusion for the Hyperion install folder and `%LOCALAPPDATA%\Hyperion`, and report the false positive.
@@ -261,6 +279,7 @@ hyperion/
     ├── chunk.rs                 Chunk container 0xB1FE3AA2 — inflate and AES-GCM
     ├── downloader.rs            Hedged, hash-checked, resumable chunk streamer
     ├── installer.rs             Verify, safe paths, safe uninstall
+    ├── mystic.rs                Dauntless 1.14.7 pin: manifest SHA-1, Epic CDN hosts, launcher exe hash
     ├── launcher.rs              Native process launch with Epic arguments
     ├── cloud_save.rs            Path templates and datastorage sync
     ├── storage.rs               SQLite persistence

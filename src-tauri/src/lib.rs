@@ -9,6 +9,7 @@ pub mod launcher;
 pub mod manifest;
 pub mod manifest_cache;
 pub mod models;
+pub mod mystic;
 pub mod network;
 pub mod secret;
 pub mod state;
@@ -21,7 +22,7 @@ pub mod winproc;
 mod tests;
 
 use std::sync::Arc;
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Keep the main app webview on the bundled UI. The Epic sign-in window is the
@@ -111,6 +112,9 @@ pub fn run() {
             commands::networks_list,
             commands::mystic_launcher_status,
             commands::launch_mystic_launcher,
+            commands::dauntless_install,
+            commands::app_hide_to_tray,
+            commands::app_quit,
             commands::open_path,
             commands::select_manifest_file,
             commands::select_directory,
@@ -140,29 +144,40 @@ pub fn run() {
             tracing::info!("Hyperion Tauri application setup completed");
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            // Closing normally parks the launcher in the tray: downloads, the
-            // Steam engine and the running-game watcher all keep going. This is
-            // a preference, so turning it off lets the window close and the
-            // process exit like a normal desktop app. Minimising stays a normal
-            // minimise — the taskbar is still where people expect it.
-            WindowEvent::CloseRequested { api, .. } => {
-                let close_to_tray = window
-                    .app_handle()
-                    .state::<Arc<crate::state::AppState>>()
-                    .storage
-                    .get_settings()
-                    .map(|settings| settings.close_to_tray)
-                    .unwrap_or(true);
-
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
-                    tracing::info!("Close-to-tray is disabled; exiting Hyperion");
+        .on_window_event(|window, event| {
+            // Closing quits Hyperion like any desktop app. While a download is
+            // running the window stays open and the UI asks first: keep
+            // downloading in the tray, or quit. The "always keep running in the
+            // tray" preference skips the question.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
                 }
+                api.prevent_close();
+
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<Arc<crate::state::AppState>>();
+                    let always_tray = state
+                        .storage
+                        .get_settings()
+                        .map(|settings| settings.close_to_tray)
+                        .unwrap_or(false);
+                    let active = crate::commands::active_download_count(&state).await;
+
+                    if always_tray {
+                        if let Some(main) = app.get_webview_window("main") {
+                            let _ = main.hide();
+                        }
+                    } else if active > 0 {
+                        tracing::info!("Close requested with {} active download(s); asking", active);
+                        let _ = app.emit_to("main", "close-requested", active);
+                    } else {
+                        tracing::info!("Window closed; exiting Hyperion");
+                        app.exit(0);
+                    }
+                });
             }
-            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running hyperion application");

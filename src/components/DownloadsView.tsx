@@ -52,6 +52,8 @@ interface DownloadsViewProps {
   onCancel: (appName: string) => void;
   onRetry?: (appName: string) => void;
   onConfigure?: (appName: string) => void;
+  /** Downloads whose source is fixed, so manifest options do not apply. */
+  fixedSource?: string[];
 }
 
 export const DownloadsView: React.FC<DownloadsViewProps> = ({
@@ -61,6 +63,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
   onCancel,
   onRetry,
   onConfigure,
+  fixedSource = [],
 }) => {
   const formatBytes = (bytes: number) => {
     const gb = bytes / (1024 * 1024 * 1024);
@@ -121,7 +124,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                           ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40'
                           : d.status === 'Paused'
                           ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                          : d.status === 'Queued'
+                          : d.status === 'Queued' || d.status === 'Verifying'
                           ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
                           : 'bg-zinc-800 text-zinc-300 border border-zinc-700'
                       }`}
@@ -132,6 +135,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     <span className={d.status === 'Queued' ? 'text-sky-400/80' : 'text-zinc-400'}>
                       {d.status === 'Queued'
                         ? 'Preparing download...'
+                        : d.status === 'Verifying' && d.downloaded_chunks === 0
+                        ? 'Checking files on disk'
                         : d.app_name.startsWith('steam_')
                         ? 'Steam engine'
                         : `${d.downloaded_chunks} / ${d.total_chunks} chunks`}
@@ -199,11 +204,18 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                     />
                   </div>
                   <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                    <span>
-                      {formatBytes(d.downloaded_bytes)} /{' '}
-                      {d.total_bytes > 0 ? formatBytes(d.total_bytes) : '—'} (
-                      {Math.min(100, Math.max(0, d.progress_percent)).toFixed(1)}%)
-                    </span>
+                    {d.status === 'Verifying' && d.downloaded_chunks === 0 ? (
+                      <span className="text-sky-300/90">
+                        Checking existing files against the manifest (
+                        {Math.min(100, Math.max(0, d.progress_percent)).toFixed(0)}%)
+                      </span>
+                    ) : (
+                      <span>
+                        {formatBytes(d.downloaded_bytes)} /{' '}
+                        {d.total_bytes > 0 ? formatBytes(d.total_bytes) : '—'} (
+                        {Math.min(100, Math.max(0, d.progress_percent)).toFixed(1)}%)
+                      </span>
+                    )}
                     <div className="flex items-center gap-2">
                       {d.status === 'Downloading' ? (
                         <>
@@ -241,7 +253,7 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
                         <span>Retry</span>
                       </button>
                     )}
-                    {onConfigure && (
+                    {onConfigure && !fixedSource.includes(d.app_name) && (
                       <button
                         onClick={() => onConfigure(d.app_name)}
                         className="px-3 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/40 text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
@@ -257,7 +269,8 @@ export const DownloadsView: React.FC<DownloadsViewProps> = ({
               {/* Current File Activity */}
               {d.current_file && d.status !== 'Failed' && (
                 <div className="text-[11px] text-zinc-400 font-mono truncate bg-zinc-900/60 px-3 py-2 rounded-xl border border-zinc-800/80">
-                  <span className="text-zinc-500">Writing: </span>{d.current_file}
+                  {d.status === 'Downloading' && <span className="text-zinc-500">Writing: </span>}
+                  {d.current_file}
                 </div>
               )}
             </div>

@@ -175,7 +175,7 @@ let mockSettings: AppSettings = {
   network_ids: [],
   platform: 'Windows',
   steam_library_scan: false,
-  close_to_tray: true,
+  close_to_tray: false,
   bootstrap_done: false,
 };
 
@@ -582,6 +582,43 @@ export const launchMysticLauncher = async (): Promise<void> => {
   console.log('Mock: launching Mystic Paradox Launcher');
 };
 
+/** Installs Dauntless 1.14.7 (Mystic Paradox) from Epic's CDN into the chosen
+ *  folder, or checks and completes the copy already in it. Returns the folder. */
+export const dauntlessInstall = async (installDir: string): Promise<string> => {
+  if (isTauri()) {
+    return invoke<string>('dauntless_install', { installDir });
+  }
+  console.log('Mock: installing Dauntless into', installDir);
+  return `${installDir.replace(/[\\/]+$/, '')}\\Dauntless`;
+};
+
+/** The window's close button while downloads run: the backend asks the UI,
+ *  passing how many downloads would stop. */
+export const listenCloseRequested = async (
+  cb: (activeDownloads: number) => void
+): Promise<UnlistenFn> => {
+  if (isTauri()) {
+    return listen<number>('close-requested', (event) => cb(event.payload));
+  }
+  const handler = (e: any) => cb(Number(e.detail) || 1);
+  window.addEventListener('hyperion:close-requested', handler);
+  return () => window.removeEventListener('hyperion:close-requested', handler);
+};
+
+export const appHideToTray = async (): Promise<void> => {
+  if (isTauri()) {
+    return invoke<void>('app_hide_to_tray');
+  }
+  console.log('Mock: hiding to the system tray');
+};
+
+export const appQuit = async (): Promise<void> => {
+  if (isTauri()) {
+    return invoke<void>('app_quit');
+  }
+  console.log('Mock: quitting Hyperion');
+};
+
 export const openPath = async (path: string): Promise<void> => {
   if (isTauri()) {
     return invoke<void>('open_path', { path });
@@ -644,13 +681,13 @@ export const manifestInspect = async (manifestPathOrUrl: string): Promise<Manife
     return {
       app_name: 'Jackal',
       build_version: '1.14.7.647472',
-      launch_exe: 'dauntless.exe',
+      launch_exe: 'Dauntless.exe',
       launch_command: '',
-      total_size: 16530000000,
+      total_size: 16521629423,
       file_count: 611,
       chunk_count: 15749,
       suggested_base_url:
-        'https://egdownload.fastly-edge.com/Builds/Org/a-krlzxj88rtb69fredeuaf887bl5az/Jackal/CloudDir',
+        'https://egs-cloudfront-chunks.epicgamescdn.com/Builds/Org/o-krlzxj88qrtb69fredeuaf887bl5az/Jackal/default',
       matched_game_title: 'Dauntless',
     };
   }
@@ -680,12 +717,13 @@ export const manifestPrefetch = async (url: string): Promise<ManifestInfo | null
   return {
     app_name: 'Jackal',
     build_version: '1.14.7.647472',
-    launch_exe: 'DauntlessClient-Win64-Shipping.exe',
+    launch_exe: 'Dauntless.exe',
     launch_command: '',
-    total_size: 32000000000,
+    total_size: 16521629423,
     file_count: 611,
     chunk_count: 15749,
-    suggested_base_url: 'https://api.mysticfox.dev/v2',
+    suggested_base_url:
+      'https://egs-cloudfront-chunks.epicgamescdn.com/Builds/Org/o-krlzxj88qrtb69fredeuaf887bl5az/Jackal/default',
     matched_game_title: 'Dauntless',
   };
 };

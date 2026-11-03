@@ -1124,6 +1124,156 @@ async fn start_steamcmd_download(
 }
 
 // ==========================================
+// Dauntless 1.14.7 (Mystic Paradox)
+// ==========================================
+
+/// The pinned Dauntless 1.14.7 manifest and its raw bytes.
+///
+/// A copy already on disk is used when it is the pinned file; otherwise it is
+/// downloaded and refused unless its SHA-1 matches, so a republished or swapped
+/// manifest can never turn the install into a different build.
+async fn dauntless_manifest(state: &AppState) -> Result<(Manifest, Vec<u8>)> {
+    use crate::mystic;
+
+    let local = [
+        crate::manifest_cache::read_installed(mystic::APP_NAME),
+        crate::manifest_cache::read(mystic::MANIFEST_URL),
+    ];
+    let bytes = match local.into_iter().flatten().find(|b| mystic::is_pinned_manifest(b)) {
+        Some(bytes) => bytes,
+        None => {
+            let bytes = state
+                .api_client
+                .download_manifest_bytes(mystic::MANIFEST_URL)
+                .await
+                .map_err(|e| {
+                    AppError::Manifest(format!(
+                        "Could not download the Dauntless 1.14.7 manifest from Mystic Paradox: {}",
+                        e
+                    ))
+                })?;
+            if !mystic::is_pinned_manifest(&bytes) {
+                return Err(AppError::Manifest(format!(
+                    "Mystic Paradox served a Dauntless manifest that is not the 1.14.7 build (SHA-1 {} expected). Nothing was downloaded.",
+                    mystic::MANIFEST_SHA1
+                )));
+            }
+            if let Err(e) = crate::manifest_cache::write(mystic::MANIFEST_URL, &bytes) {
+                warn!("Could not cache the Dauntless manifest: {}", e);
+            }
+            bytes
+        }
+    };
+
+    let manifest = Manifest::parse(&bytes)?;
+    if manifest.meta.build_version != mystic::BUILD_VERSION {
+        return Err(AppError::Manifest(format!(
+            "The Dauntless manifest is build {}, not {}",
+            manifest.meta.build_version,
+            mystic::BUILD_VERSION
+        )));
+    }
+    Ok((manifest, bytes))
+}
+
+/// The first of Epic's CDN hosts that serves this build's chunks. No Epic
+/// account is involved: these hosts serve the chunks without one.
+async fn dauntless_chunk_base(manifest: &Manifest) -> Result<String> {
+    let chunk_path = manifest
+        .chunk_data_list
+        .first()
+        .map(|c| c.path(manifest.version))
+        .ok_or_else(|| AppError::Manifest("The Dauntless manifest lists no chunks".to_string()))?;
+
+    for base in crate::mystic::CHUNK_BASES {
+        if chunk_base_responds(base, &chunk_path, None).await {
+            info!("Dauntless chunks from {}", base);
+            return Ok(base.to_string());
+        }
+        warn!("Dauntless chunk CDN {} did not answer", base);
+    }
+    Err(AppError::Download(
+        "None of Epic's download servers answered for Dauntless 1.14.7. Check your internet connection and try again."
+            .to_string(),
+    ))
+}
+
+/// Installs Dauntless 1.14.7 into the folder the user picked (or the copy
+/// already in it). Every file on disk is checked against the pinned manifest
+/// first; only missing or different files are downloaded. Returns the folder.
+async fn start_dauntless_download(
+    app_handle: AppHandle,
+    install_dir: Option<String>,
+    state: &AppState,
+) -> Result<String> {
+    use crate::mystic;
+
+    let (manifest, manifest_bytes) = dauntless_manifest(state).await?;
+    let base_url = dauntless_chunk_base(&manifest).await?;
+
+    let settings = state.storage.get_settings()?;
+    let default_root = PathBuf::from(&settings.default_install_dir);
+    let existing = state
+        .storage
+        .get_installed_game(mystic::APP_NAME)
+        .ok()
+        .flatten()
+        .map(|g| PathBuf::from(g.install_path));
+    let target_dir = match install_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(chosen) => mystic::target_dir(std::path::Path::new(chosen), &default_root, existing.as_deref()),
+        None => existing.unwrap_or_else(|| default_root.join(mystic::TITLE)),
+    };
+    info!("Installing Dauntless {} into {}", mystic::BUILD_VERSION, target_dir.display());
+
+    let installed = InstalledGame {
+        app_name: mystic::APP_NAME.to_string(),
+        title: mystic::TITLE.to_string(),
+        version: mystic::BUILD_VERSION.to_string(),
+        install_path: target_dir.to_string_lossy().to_string(),
+        executable: manifest.meta.launch_exe.clone(),
+        launch_parameters: manifest.meta.launch_command.clone(),
+        install_size: manifest.file_manifest_list.iter().map(|f| f.file_size).sum(),
+        can_run_offline: true,
+        requires_ot: false,
+        platform: settings.platform.clone(),
+        is_dlc: false,
+        base_urls: vec![base_url.clone()],
+        installed_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+
+    state
+        .downloader
+        .clone()
+        .start_download(
+            app_handle,
+            mystic::APP_NAME.to_string(),
+            mystic::TITLE.to_string(),
+            manifest,
+            manifest_bytes,
+            base_url,
+            None,
+            target_dir.clone(),
+            settings.max_workers,
+            Some(installed),
+            state.storage.clone(),
+        )
+        .await?;
+
+    Ok(target_dir.to_string_lossy().to_string())
+}
+
+/// The Mystic Paradox card's Download button: always build 1.14.7, always from
+/// Epic's CDN, into the chosen folder.
+#[tauri::command]
+pub async fn dauntless_install(
+    app_handle: AppHandle,
+    install_dir: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String> {
+    start_dauntless_download(app_handle, Some(install_dir), &state).await
+}
+
+// ==========================================
 // Installation & Download Commands
 // ==========================================
 
@@ -1135,6 +1285,13 @@ pub async fn game_install(
     state: State<'_, Arc<AppState>>,
 ) -> Result<()> {
     info!("Requested installation for {}", app_name);
+
+    // Epic would hand out Dauntless 2.1.1; Mystic Paradox needs 1.14.7.
+    if crate::mystic::is_dauntless(&app_name) {
+        return start_dauntless_download(app_handle, install_dir, &state)
+            .await
+            .map(|_| ());
+    }
 
     let settings = state.storage.get_settings()?;
 
@@ -1545,17 +1702,22 @@ async fn inspect_manifest(
         }
     }
 
-    let epic_token = state.api_client.fresh_session().await.ok().map(|s| s.access_token);
-    let final_base_url = pick_chunk_base(
-        state,
-        &manifest,
-        &aliases,
-        suggested_base_url.as_deref(),
-        None,
-        epic_token.as_deref(),
-    )
-    .await
-    .or(suggested_base_url);
+    let final_base_url = if crate::mystic::is_dauntless(&app_name) {
+        // Its manifest host serves no chunks; Dauntless always comes from Epic's CDN
+        dauntless_chunk_base(&manifest).await.ok()
+    } else {
+        let epic_token = state.api_client.fresh_session().await.ok().map(|s| s.access_token);
+        pick_chunk_base(
+            state,
+            &manifest,
+            &aliases,
+            suggested_base_url.as_deref(),
+            None,
+            epic_token.as_deref(),
+        )
+        .await
+        .or(suggested_base_url)
+    };
 
     Ok(ManifestInfo {
         app_name,
@@ -1667,6 +1829,25 @@ pub async fn game_install_custom_manifest(
 
     // 2. Parse manifest binary
     let manifest = Manifest::parse(&manifest_bytes)?;
+
+    // Dauntless is installed only as the pinned 1.14.7 build, from Epic's CDN —
+    // whatever folder or override this dialog was given.
+    let requested_name = request.app_name.as_deref().map(str::trim).unwrap_or("");
+    if crate::mystic::is_dauntless(&manifest.meta.app_name) || crate::mystic::is_dauntless(requested_name) {
+        if !crate::mystic::is_pinned_manifest(&manifest_bytes) {
+            return Err(AppError::Manifest(format!(
+                "Hyperion installs Dauntless only as build {} for Mystic Paradox; this manifest is {}.",
+                crate::mystic::BUILD_VERSION,
+                if manifest.meta.build_version.is_empty() {
+                    "a different build"
+                } else {
+                    manifest.meta.build_version.as_str()
+                }
+            )));
+        }
+        start_dauntless_download(app_handle, request.install_dir, &state).await?;
+        return Ok(());
+    }
 
     // 3. Resolve app_name
     let app_name = request
@@ -1897,6 +2078,30 @@ pub async fn game_verify(
     verify_on_disk(installed, manifest).await
 }
 
+/// Hashes the install on the blocking pool: a multi-GB verify inside the async
+/// command used to stall the runtime (and every other request) until it ended.
+///
+/// Dauntless is also held to the Mystic Paradox launcher's own check: its game
+/// executable must have the SHA-256 the launcher accepts for 1.14.7.
+async fn verify_on_disk(installed: InstalledGame, manifest: Manifest) -> Result<VerificationResult> {
+    tokio::task::spawn_blocking(move || {
+        let mut result = Installer::verify_installed_game(&installed, &manifest)?;
+        if crate::mystic::is_dauntless(&installed.app_name) {
+            let exe = crate::mystic::GAME_EXE.to_string();
+            let listed = result.missing_files.contains(&exe) || result.corrupt_files.contains(&exe);
+            let dir = std::path::Path::new(&installed.install_path);
+            if !listed && crate::mystic::exe_matches_launcher(dir) == Some(false) {
+                result.valid_files = result.valid_files.saturating_sub(1);
+                result.corrupt_files.push(exe);
+                result.is_valid = false;
+            }
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| AppError::Verification(format!("Verification did not finish: {}", e)))?
+}
+
 /// Verifies an install, then re-downloads only the files that failed.
 ///
 /// Corrupt files are deleted first: the resume journal still vouches for them,
@@ -1913,12 +2118,18 @@ pub async fn game_repair(
         .ok_or_else(|| AppError::Verification(format!("Game {} is not installed", app_name)))?;
 
     let (manifest, manifest_bytes) = installed_manifest(&state, &installed).await?;
-    let base_url = installed.base_urls.first().cloned().ok_or_else(|| {
-        AppError::Verification(format!(
-            "No download source is recorded for {}. Install it again into the same folder.",
-            installed.title
-        ))
-    })?;
+    let dauntless = crate::mystic::is_dauntless(&installed.app_name);
+    let base_url = if dauntless {
+        // Picked when the download starts, from Epic's CDN hosts for 1.14.7
+        String::new()
+    } else {
+        installed.base_urls.first().cloned().ok_or_else(|| {
+            AppError::Verification(format!(
+                "No download source is recorded for {}. Install it again into the same folder.",
+                installed.title
+            ))
+        })?
+    };
 
     let result = verify_on_disk(installed.clone(), manifest.clone()).await?;
     if result.is_valid {
@@ -1939,6 +2150,11 @@ pub async fn game_repair(
         result.missing_files.len(),
         result.corrupt_files.len()
     );
+
+    if dauntless {
+        start_dauntless_download(app_handle, Some(installed.install_path.clone()), &state).await?;
+        return Ok(result);
+    }
 
     let settings = state.storage.get_settings()?;
     state
@@ -1962,14 +2178,6 @@ pub async fn game_repair(
     Ok(result)
 }
 
-/// Hashes the install on the blocking pool: a multi-GB verify inside the async
-/// command used to stall the runtime (and every other request) until it ended.
-async fn verify_on_disk(installed: InstalledGame, manifest: Manifest) -> Result<VerificationResult> {
-    tokio::task::spawn_blocking(move || Installer::verify_installed_game(&installed, &manifest))
-        .await
-        .map_err(|e| AppError::Verification(format!("Verification did not finish: {}", e)))?
-}
-
 /// The manifest an install was made from (and its raw bytes).
 ///
 /// Installs keep their exact manifest since this was added. An older Epic
@@ -1977,6 +2185,11 @@ async fn verify_on_disk(installed: InstalledGame, manifest: Manifest) -> Result<
 /// the same build — checking files against a newer build reports an intact
 /// game as corrupt.
 async fn installed_manifest(state: &AppState, installed: &InstalledGame) -> Result<(Manifest, Vec<u8>)> {
+    // Dauntless is checked against 1.14.7 itself, never another saved build
+    if crate::mystic::is_dauntless(&installed.app_name) {
+        return dauntless_manifest(state).await;
+    }
+
     if let Some(bytes) = crate::manifest_cache::read_installed(&installed.app_name) {
         match Manifest::parse(&bytes) {
             Ok(manifest) => return Ok((manifest, bytes)),
@@ -2758,6 +2971,30 @@ pub(crate) fn open_mystic_paradox_releases() -> Result<()> {
 #[tauri::command]
 pub async fn launch_mystic_launcher() -> Result<()> {
     launch_mystic_launcher_process()
+}
+
+// ==========================================
+// Window close
+// ==========================================
+
+/// Downloads that would stop if Hyperion quit now (Epic and Steam).
+pub async fn active_download_count(state: &AppState) -> usize {
+    state.downloader.get_all_active().await.len()
+        + state.steam_downloader.active_downloads().await.len()
+}
+
+/// "Keep downloading in the tray" from the close prompt.
+#[tauri::command]
+pub async fn app_hide_to_tray(window: tauri::WebviewWindow) -> Result<()> {
+    window.hide().map_err(|e| AppError::Io(e.to_string()))
+}
+
+/// "Quit" from the close prompt.
+#[tauri::command]
+pub async fn app_quit(app_handle: AppHandle) -> Result<()> {
+    info!("Quitting Hyperion from the close prompt");
+    app_handle.exit(0);
+    Ok(())
 }
 
 /// Opens a folder/file in Explorer or an http(s) link in the browser.
