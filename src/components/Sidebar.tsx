@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Compass,
   Gamepad2,
@@ -12,7 +12,8 @@ import {
   Square,
   UserRound,
 } from 'lucide-react';
-import { NavigationTab, RunningGame } from '../types';
+import { NavigationTab, RunningGame, UserProfile } from '../types';
+import { appVersion } from '../lib/ipc';
 
 interface SidebarProps {
   activeTab: NavigationTab;
@@ -22,6 +23,10 @@ interface SidebarProps {
   onToggleCollapsed: () => void;
   runningGames?: RunningGame[];
   onStopGame?: (appName: string) => void;
+  /** The signed-in Epic account, or null when not logged in */
+  epicUser?: UserProfile | null;
+  /** False until the saved Epic session has been checked at startup */
+  epicChecked?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -32,7 +37,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapsed,
   runningGames = [],
   onStopGame,
+  epicUser = null,
+  epicChecked = true,
 }) => {
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    appVersion()
+      .then(setVersion)
+      .catch(() => setVersion(null));
+  }, []);
+
+  const epicStatus = !epicChecked
+    ? 'Checking Epic sign-in…'
+    : epicUser
+    ? 'Logged in with Epic'
+    : 'Not logged in';
+  const epicTitle = epicUser
+    ? `Logged in with Epic as ${epicUser.display_name}`
+    : epicStatus;
   const navItems = [
     { id: 'home' as NavigationTab, label: 'Discover', icon: Compass },
     { id: 'library' as NavigationTab, label: 'My Library', icon: Gamepad2 },
@@ -61,7 +84,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           className={`h-18 flex items-center border-b border-zinc-800/80 bg-black/40 shrink-0 ${collapsed ? 'justify-center px-2' : 'gap-3.5 px-5'
             }`}
         >
-          <div className="w-10 h-10 rounded-xl bg-black border border-orange-500/40 flex items-center justify-center shadow-lg shadow-orange-500/20 overflow-hidden shrink-0">
+          <div
+            className="w-10 h-10 rounded-xl bg-black border border-orange-500/40 flex items-center justify-center shadow-lg shadow-orange-500/20 overflow-hidden shrink-0"
+            title={collapsed && version ? `Hyperion v${version}` : undefined}
+          >
             <img
               src="/hyperion logo.png"
               alt="Hyperion Logo"
@@ -72,6 +98,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="min-w-0">
               <div className="font-extrabold text-sm tracking-wide text-white flex items-center gap-1.5 truncate">
                 <span>HYPERION</span>
+                {version && (
+                  <span
+                    className="rounded-md border border-zinc-700/80 bg-zinc-900 px-1.5 py-px font-mono text-[9px] font-semibold tracking-normal text-zinc-400"
+                    title="Hyperion version"
+                  >
+                    v{version}
+                  </span>
+                )}
               </div>
               <div className="text-[10px] text-zinc-400 font-medium truncate">
                 Native Game Launcher
@@ -178,8 +212,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Account management replaces the old profile card */}
         <button
           onClick={() => onTabChange('account')}
-          title="Account Management"
-          aria-label="Account Management"
+          title={`Account Management: ${epicTitle}`}
+          aria-label={`Account Management: ${epicTitle}`}
           aria-current={activeTab === 'account' ? 'page' : undefined}
           className={`group flex w-full items-center rounded-xl border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${collapsed ? 'justify-center px-0 py-2' : 'gap-2.5 px-2 py-2'
             } ${activeTab === 'account'
@@ -188,7 +222,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             }`}
         >
           <span
-            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition ${activeTab === 'account'
+            className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition ${activeTab === 'account'
                 ? 'border-orange-400/50 bg-orange-500/20'
                 : 'border-zinc-800 bg-zinc-900 group-hover:border-orange-500/30'
               }`}
@@ -199,6 +233,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   : 'text-zinc-400 group-hover:text-orange-400'
                 }`}
             />
+            {collapsed && epicChecked && (
+              <span
+                className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border border-black ${epicUser ? 'bg-emerald-400' : 'bg-zinc-500'
+                  }`}
+              />
+            )}
           </span>
           {!collapsed && (
             <>
@@ -209,8 +249,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   Account Management
                 </span>
-                <span className="block truncate text-[10px] font-medium text-zinc-500">
-                  Manage all your accounts
+                <span
+                  className={`flex items-center gap-1.5 text-[10px] font-medium ${epicUser ? 'text-emerald-300/90' : 'text-zinc-500'
+                    }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${!epicChecked ? 'bg-zinc-600 animate-pulse' : epicUser ? 'bg-emerald-400' : 'bg-zinc-500'
+                      }`}
+                  />
+                  <span className="truncate">{epicStatus}</span>
                 </span>
               </span>
               <ChevronRight

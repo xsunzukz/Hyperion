@@ -997,6 +997,8 @@ export const App: React.FC = () => {
         onToggleCollapsed={toggleSidebar}
         runningGames={runningGamesList}
         onStopGame={handleStopApp}
+        epicUser={user}
+        epicChecked={sessionChecked}
       />
 
       {/* Main App Workspace */}

@@ -1,3 +1,4 @@
+import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
@@ -27,6 +28,14 @@ import {
 
 export const isTauri = (): boolean => {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+};
+
+/** Hyperion's own version (from tauri.conf.json), e.g. "1.0.5" */
+export const appVersion = async (): Promise<string> => {
+  if (isTauri()) {
+    return getVersion();
+  }
+  return '1.0.5';
 };
 
 // ==========================================
