@@ -94,7 +94,7 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'text-zinc-400 hover:text-white'
               }`}
             >
-              {filter}
+              {filter === 'uninstalled' ? 'Not Installed' : filter}
             </button>
           ))}
         </div>
